@@ -133,7 +133,7 @@ if (httpMode)
     Console.Error.WriteLine($"Database: {recallConfig.DatabasePath}");
     Console.Error.WriteLine($"Auth: {(diaryDb.HasApiKeys() ? "enabled" : "disabled (no API keys created)")}");
 
-    app.Run($"http://0.0.0.0:{port}");
+    app.Run($"http://127.0.0.1:{port}");
 }
 else
 {
