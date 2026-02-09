@@ -49,6 +49,38 @@ public class DiaryDatabase : IDisposable
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
+    public bool UpdateEntry(int id, string content, string? tags = null)
+    {
+        // Check if entry exists
+        using var checkCmd = _conn.CreateCommand();
+        checkCmd.CommandText = "SELECT id FROM entries WHERE id = @id";
+        checkCmd.Parameters.AddWithValue("@id", id);
+        if (checkCmd.ExecuteScalar() is null) return false;
+
+        // Generate new embedding if available
+        var textToEmbed = string.IsNullOrEmpty(tags) ? content : $"{content}\n{tags}";
+        byte[]? embeddingBlob = null;
+        if (_embeddings is { IsAvailable: true })
+        {
+            try { embeddingBlob = EmbeddingService.Serialize(_embeddings.Embed(textToEmbed)); }
+            catch { /* non-fatal: entry updated without embedding */ }
+        }
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE entries
+            SET content = @content,
+                tags = @tags,
+                embedding = @emb
+            WHERE id = @id
+            """;
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.AddWithValue("@content", content);
+        cmd.Parameters.AddWithValue("@tags", (object?)tags ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@emb", (object?)embeddingBlob ?? DBNull.Value);
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
     public List<DiaryEntry> Search(string query, int limit = 10)
     {
         if (string.IsNullOrWhiteSpace(query))

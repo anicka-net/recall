@@ -27,6 +27,21 @@ public class DiaryTools
         return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}.";
     }
 
+    [McpServerTool(Name = "diary_update")]
+    [Description("Update an existing diary entry. Replaces the content and tags of the specified entry. The created_at timestamp is preserved.")]
+    public static string Update(
+        DiaryDatabase db,
+        [Description("The ID of the entry to update")] int id,
+        [Description("The new content for the entry")] string content,
+        [Description("Optional new tags (replaces existing tags)")] string? tags = null)
+    {
+        var success = db.UpdateEntry(id, content, tags);
+        if (!success)
+            return $"Entry #{id} not found.";
+
+        return $"Entry #{id} updated at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}.";
+    }
+
     [McpServerTool(Name = "diary_query")]
     [Description("Search past diary entries using natural language. Use keywords or phrases to find specific topics, events, or decisions.")]
 
