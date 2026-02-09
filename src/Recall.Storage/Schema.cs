@@ -45,6 +45,19 @@ public static class Schema
             INSERT INTO entries_fts(rowid, content, tags)
             VALUES (new.id, new.content, new.tags);
         END;
+
+        -- API keys for HTTP transport authentication
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            key_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            last_used TEXT,
+            revoked INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_api_keys_hash
+            ON api_keys(key_hash) WHERE revoked = 0;
         """;
 
     public static void Initialize(SqliteConnection connection)

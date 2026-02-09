@@ -9,3 +9,9 @@ obj/
 .idea/
 *.swp
 *~
+
+# Never commit secrets or personal data
+*.pem
+*.key
+appsettings.*.json
+secrets.json
