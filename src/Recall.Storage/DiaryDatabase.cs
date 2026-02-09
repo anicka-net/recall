@@ -46,26 +46,41 @@ public class DiaryDatabase : IDisposable
 
         try
         {
-            using var cmd = _conn.CreateCommand();
-            cmd.CommandText = """
-                SELECT e.id, e.created_at, e.content, e.tags, e.conversation_id
-                FROM entries e
-                WHERE e.id IN (
-                    SELECT rowid FROM entries_fts
-                    WHERE entries_fts MATCH @query
-                )
-                ORDER BY e.created_at DESC
-                LIMIT @limit
-                """;
-            cmd.Parameters.AddWithValue("@query", sanitized);
-            cmd.Parameters.AddWithValue("@limit", limit);
-            return ReadEntries(cmd);
+            // Try exact match first (implicit AND - all words must appear)
+            var results = FtsQuery(sanitized, limit);
+
+            // If no results and multi-word query, retry with OR (any word matches)
+            if (results.Count == 0 && sanitized.Contains(' '))
+            {
+                var orQuery = string.Join(" OR ", sanitized.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+                results = FtsQuery(orQuery, limit);
+            }
+
+            return results;
         }
         catch
         {
             // FTS5 query failed - fall back to LIKE search
             return SearchLike(query, limit);
         }
+    }
+
+    private List<DiaryEntry> FtsQuery(string ftsExpression, int limit)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT e.id, e.created_at, e.content, e.tags, e.conversation_id
+            FROM entries e
+            WHERE e.id IN (
+                SELECT rowid FROM entries_fts
+                WHERE entries_fts MATCH @query
+            )
+            ORDER BY e.created_at DESC
+            LIMIT @limit
+            """;
+        cmd.Parameters.AddWithValue("@query", ftsExpression);
+        cmd.Parameters.AddWithValue("@limit", limit);
+        return ReadEntries(cmd);
     }
 
     public List<DiaryEntry> GetRecent(int count = 10)
