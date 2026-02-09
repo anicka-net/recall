@@ -5,6 +5,7 @@ namespace Recall.Server;
 public class RecallConfig
 {
     public string DatabasePath { get; init; } = "";
+    public string ModelPath { get; init; } = "";
     public string SystemPrompt { get; init; } = "";
     public int AutoContextLimit { get; init; } = 5;
     public int SearchResultLimit { get; init; } = 10;
@@ -46,9 +47,13 @@ public class RecallConfig
         var dbPath = file?.DatabasePath
             ?? Path.Combine(configDir, "recall.db");
 
+        var modelPath = file?.ModelPath
+            ?? Path.Combine(configDir, "models", "all-MiniLM-L6-v2");
+
         return new RecallConfig
         {
             DatabasePath = dbPath,
+            ModelPath = modelPath,
             SystemPrompt = systemPrompt,
             AutoContextLimit = file?.AutoContextLimit ?? 5,
             SearchResultLimit = file?.SearchResultLimit ?? 10,
@@ -59,6 +64,7 @@ public class RecallConfig
 public class ConfigFile
 {
     public string? DatabasePath { get; set; }
+    public string? ModelPath { get; set; }
     public string? SystemPrompt { get; set; }
     public string? PromptFile { get; set; }
     public int? AutoContextLimit { get; set; }

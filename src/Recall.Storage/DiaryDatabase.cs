@@ -13,20 +13,31 @@ public record DiaryEntry(
 public class DiaryDatabase : IDisposable
 {
     private readonly SqliteConnection _conn;
+    private readonly EmbeddingService? _embeddings;
     private bool _disposed;
 
-    public DiaryDatabase(string dbPath)
+    public DiaryDatabase(string dbPath, EmbeddingService? embeddings = null)
     {
         _conn = Schema.CreateConnection(dbPath);
+        _embeddings = embeddings;
     }
 
     public int WriteEntry(string content, string? tags = null, string? conversationId = null,
         string source = "claude-code")
     {
+        // Combine content and tags for embedding (tags add searchable context)
+        var textToEmbed = string.IsNullOrEmpty(tags) ? content : $"{content}\n{tags}";
+        byte[]? embeddingBlob = null;
+        if (_embeddings is { IsAvailable: true })
+        {
+            try { embeddingBlob = EmbeddingService.Serialize(_embeddings.Embed(textToEmbed)); }
+            catch { /* non-fatal: entry saved without embedding */ }
+        }
+
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO entries (created_at, content, tags, conversation_id, source)
-            VALUES (@now, @content, @tags, @cid, @source);
+            INSERT INTO entries (created_at, content, tags, conversation_id, source, embedding)
+            VALUES (@now, @content, @tags, @cid, @source, @emb);
             SELECT last_insert_rowid();
             """;
         cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
@@ -34,53 +45,59 @@ public class DiaryDatabase : IDisposable
         cmd.Parameters.AddWithValue("@tags", (object?)tags ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@cid", (object?)conversationId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@source", source);
+        cmd.Parameters.AddWithValue("@emb", (object?)embeddingBlob ?? DBNull.Value);
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
     public List<DiaryEntry> Search(string query, int limit = 10)
     {
-        // Sanitize query for FTS5: remove special chars, wrap tokens
-        var sanitized = SanitizeFtsQuery(query);
-        if (string.IsNullOrWhiteSpace(sanitized))
+        if (string.IsNullOrWhiteSpace(query))
             return GetRecent(limit);
 
-        try
+        // Vector search if embeddings are available
+        if (_embeddings is { IsAvailable: true })
         {
-            // Try exact match first (implicit AND - all words must appear)
-            var results = FtsQuery(sanitized, limit);
-
-            // If no results and multi-word query, retry with OR (any word matches)
-            if (results.Count == 0 && sanitized.Contains(' '))
-            {
-                var orQuery = string.Join(" OR ", sanitized.Split(' ', StringSplitOptions.RemoveEmptyEntries));
-                results = FtsQuery(orQuery, limit);
-            }
-
-            return results;
+            try { return VectorSearch(query, limit); }
+            catch { /* fall through to LIKE */ }
         }
-        catch
-        {
-            // FTS5 query failed - fall back to LIKE search
-            return SearchLike(query, limit);
-        }
+
+        return SearchLike(query, limit);
     }
 
-    private List<DiaryEntry> FtsQuery(string ftsExpression, int limit)
+    private List<DiaryEntry> VectorSearch(string query, int limit)
     {
+        var queryEmbedding = _embeddings!.Embed(query);
+
+        // Load all entries that have embeddings
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
-            SELECT e.id, e.created_at, e.content, e.tags, e.conversation_id
-            FROM entries e
-            WHERE e.id IN (
-                SELECT rowid FROM entries_fts
-                WHERE entries_fts MATCH @query
-            )
-            ORDER BY e.created_at DESC
-            LIMIT @limit
+            SELECT id, created_at, content, tags, conversation_id, embedding
+            FROM entries
+            WHERE embedding IS NOT NULL
             """;
-        cmd.Parameters.AddWithValue("@query", ftsExpression);
-        cmd.Parameters.AddWithValue("@limit", limit);
-        return ReadEntries(cmd);
+
+        var scored = new List<(DiaryEntry Entry, float Score)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var entry = new DiaryEntry(
+                Id: reader.GetInt32(0),
+                CreatedAt: DateTimeOffset.Parse(reader.GetString(1)),
+                Content: reader.GetString(2),
+                Tags: reader.IsDBNull(3) ? null : reader.GetString(3),
+                ConversationId: reader.IsDBNull(4) ? null : reader.GetString(4));
+
+            var blob = (byte[])reader.GetValue(5);
+            var embedding = EmbeddingService.Deserialize(blob);
+            var score = EmbeddingService.Similarity(queryEmbedding, embedding);
+            scored.Add((entry, score));
+        }
+
+        return scored
+            .OrderByDescending(x => x.Score)
+            .Take(limit)
+            .Select(x => x.Entry)
+            .ToList();
     }
 
     public List<DiaryEntry> GetRecent(int count = 10)
@@ -118,33 +135,6 @@ public class DiaryDatabase : IDisposable
         return ReadEntries(cmd);
     }
 
-    private static string SanitizeFtsQuery(string query)
-    {
-        // Remove FTS5 special characters that cause parse errors
-        var cleaned = query
-            .Replace("\"", " ")
-            .Replace("'", " ")
-            .Replace("(", " ")
-            .Replace(")", " ")
-            .Replace("*", " ")
-            .Replace(":", " ")
-            .Replace("?", " ")
-            .Replace("!", " ")
-            .Replace(".", " ")
-            .Replace(",", " ");
-
-        // Split into words, filter empty, rejoin (implicit AND in FTS5)
-        var words = cleaned.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        // Remove FTS5 operators that might appear as words
-        var filtered = words.Where(w =>
-            !w.Equals("AND", StringComparison.OrdinalIgnoreCase) &&
-            !w.Equals("OR", StringComparison.OrdinalIgnoreCase) &&
-            !w.Equals("NOT", StringComparison.OrdinalIgnoreCase) &&
-            !w.Equals("NEAR", StringComparison.OrdinalIgnoreCase));
-
-        return string.Join(" ", filtered);
-    }
-
     private static List<DiaryEntry> ReadEntries(SqliteCommand cmd)
     {
         var entries = new List<DiaryEntry>();
@@ -159,6 +149,59 @@ public class DiaryDatabase : IDisposable
                 ConversationId: reader.IsDBNull(4) ? null : reader.GetString(4)));
         }
         return entries;
+    }
+
+    // ── Embedding Backfill ──────────────────────────────────────
+
+    /// <summary>
+    /// Generate embeddings for any entries that don't have one yet.
+    /// Call once at startup.
+    /// </summary>
+    public int BackfillEmbeddings()
+    {
+        if (_embeddings is not { IsAvailable: true }) return 0;
+
+        using var selectCmd = _conn.CreateCommand();
+        selectCmd.CommandText = "SELECT id, content, tags FROM entries WHERE embedding IS NULL";
+
+        var toBackfill = new List<(int Id, string Text)>();
+        using (var reader = selectCmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                var id = reader.GetInt32(0);
+                var content = reader.GetString(1);
+                var tags = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var text = string.IsNullOrEmpty(tags) ? content : $"{content}\n{tags}";
+                toBackfill.Add((id, text));
+            }
+        }
+
+        if (toBackfill.Count == 0) return 0;
+
+        Console.Error.WriteLine($"Backfilling embeddings for {toBackfill.Count} entries...");
+
+        var count = 0;
+        foreach (var (id, text) in toBackfill)
+        {
+            try
+            {
+                var emb = EmbeddingService.Serialize(_embeddings.Embed(text));
+                using var updateCmd = _conn.CreateCommand();
+                updateCmd.CommandText = "UPDATE entries SET embedding = @emb WHERE id = @id";
+                updateCmd.Parameters.AddWithValue("@emb", emb);
+                updateCmd.Parameters.AddWithValue("@id", id);
+                updateCmd.ExecuteNonQuery();
+                count++;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  Failed entry #{id}: {ex.Message}");
+            }
+        }
+
+        Console.Error.WriteLine($"Backfilled {count}/{toBackfill.Count} entries.");
+        return count;
     }
 
     // ── API Key Management ─────────────────────────────────────

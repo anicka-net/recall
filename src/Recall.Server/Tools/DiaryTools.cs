@@ -29,6 +29,7 @@ public class DiaryTools
 
     [McpServerTool(Name = "diary_query")]
     [Description("Search past diary entries using natural language. Use keywords or phrases to find specific topics, events, or decisions.")]
+
     public static string Query(
         DiaryDatabase db,
         RecallConfig config,

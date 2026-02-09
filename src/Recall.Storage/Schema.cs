@@ -65,6 +65,26 @@ public static class Schema
         using var cmd = connection.CreateCommand();
         cmd.CommandText = CreateTablesSql;
         cmd.ExecuteNonQuery();
+
+        Migrate(connection);
+    }
+
+    private static void Migrate(SqliteConnection connection)
+    {
+        using var verCmd = connection.CreateCommand();
+        verCmd.CommandText = "PRAGMA user_version";
+        var version = Convert.ToInt32(verCmd.ExecuteScalar());
+
+        if (version < 1)
+        {
+            // Add embedding column for vector search
+            using var alter = connection.CreateCommand();
+            alter.CommandText = """
+                ALTER TABLE entries ADD COLUMN embedding BLOB;
+                PRAGMA user_version = 1;
+                """;
+            alter.ExecuteNonQuery();
+        }
     }
 
     public static SqliteConnection CreateConnection(string dbPath)

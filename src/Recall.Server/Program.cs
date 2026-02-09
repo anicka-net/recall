@@ -73,7 +73,9 @@ if (args.Length >= 1 && args[0] == "key")
 
 // ── MCP Server ───────────────────────────────────────────────
 var recallConfig = RecallConfig.Load();
-var diaryDb = new DiaryDatabase(recallConfig.DatabasePath);
+var embeddings = new EmbeddingService(recallConfig.ModelPath);
+var diaryDb = new DiaryDatabase(recallConfig.DatabasePath, embeddings);
+diaryDb.BackfillEmbeddings();
 
 if (httpMode)
 {
