@@ -1,0 +1,11 @@
+bin/
+obj/
+*.db
+*.db-wal
+*.db-shm
+.vs/
+*.user
+*.suo
+.idea/
+*.swp
+*~
