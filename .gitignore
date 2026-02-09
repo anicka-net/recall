@@ -15,3 +15,5 @@ obj/
 *.key
 appsettings.*.json
 secrets.json
+deploy/
+publish/
