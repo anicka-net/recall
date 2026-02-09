@@ -23,6 +23,15 @@ public class DiaryTools
         [Description("Optional comma-separated tags (e.g. 'work,decision,project-x')")] string? tags = null,
         [Description("Optional conversation ID to group related entries")] string? conversationId = null)
     {
+        // Auto-prepend date header if not already present
+        if (!content.StartsWith("**Date:", StringComparison.OrdinalIgnoreCase)
+            && !content.StartsWith("Date:", StringComparison.OrdinalIgnoreCase))
+        {
+            var now = DateTimeOffset.Now;
+            var dateHeader = $"**Date: {now:MMMM d, yyyy} ({now:dddd} {now:HH:mm})**";
+            content = $"{dateHeader}\n\n{content}";
+        }
+
         var id = db.WriteEntry(content, tags, conversationId);
         return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}.";
     }
