@@ -183,6 +183,95 @@ public class DiaryDatabase : IDisposable
         return entries;
     }
 
+    // ── Health Data ──────────────────────────────────────────────
+
+    public HealthEntry? GetHealthByDate(string date)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT date, summary FROM health_data WHERE date = @date";
+        cmd.Parameters.AddWithValue("@date", date);
+        using var reader = cmd.ExecuteReader();
+        if (reader.Read())
+            return new HealthEntry(reader.GetString(0), reader.GetString(1));
+        return null;
+    }
+
+    public List<HealthEntry> GetRecentHealth(int days = 7)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT date, summary FROM health_data
+            ORDER BY date DESC LIMIT @days
+            """;
+        cmd.Parameters.AddWithValue("@days", days);
+
+        var entries = new List<HealthEntry>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            entries.Add(new HealthEntry(reader.GetString(0), reader.GetString(1)));
+        return entries;
+    }
+
+    public List<HealthEntry> SearchHealth(string query, int limit = 7)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            return GetRecentHealth(limit);
+
+        if (_embeddings is { IsAvailable: true })
+        {
+            try { return HealthVectorSearch(query, limit); }
+            catch { /* fall through to LIKE */ }
+        }
+
+        return HealthSearchLike(query, limit);
+    }
+
+    private List<HealthEntry> HealthVectorSearch(string query, int limit)
+    {
+        var queryEmbedding = _embeddings!.Embed(query);
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT date, summary, embedding FROM health_data
+            WHERE embedding IS NOT NULL
+            """;
+
+        var scored = new List<(HealthEntry Entry, float Score)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var entry = new HealthEntry(reader.GetString(0), reader.GetString(1));
+            var blob = (byte[])reader.GetValue(2);
+            var embedding = EmbeddingService.Deserialize(blob);
+            var score = EmbeddingService.Similarity(queryEmbedding, embedding);
+            scored.Add((entry, score));
+        }
+
+        return scored
+            .OrderByDescending(x => x.Score)
+            .Take(limit)
+            .Select(x => x.Entry)
+            .ToList();
+    }
+
+    private List<HealthEntry> HealthSearchLike(string query, int limit)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT date, summary FROM health_data
+            WHERE summary LIKE @pattern
+            ORDER BY date DESC LIMIT @limit
+            """;
+        cmd.Parameters.AddWithValue("@pattern", $"%{query}%");
+        cmd.Parameters.AddWithValue("@limit", limit);
+
+        var entries = new List<HealthEntry>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            entries.Add(new HealthEntry(reader.GetString(0), reader.GetString(1)));
+        return entries;
+    }
+
     // ── Embedding Backfill ──────────────────────────────────────
 
     /// <summary>
@@ -353,6 +442,8 @@ public class DiaryDatabase : IDisposable
         GC.SuppressFinalize(this);
     }
 }
+
+public record HealthEntry(string Date, string Summary);
 
 public record ApiKeyInfo(
     int Id,

@@ -85,6 +85,28 @@ public static class Schema
                 """;
             alter.ExecuteNonQuery();
         }
+
+        if (version < 2)
+        {
+            // Add health_data table for Fitbit health metrics
+            using var health = connection.CreateCommand();
+            health.CommandText = """
+                CREATE TABLE IF NOT EXISTS health_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL UNIQUE,
+                    summary TEXT NOT NULL,
+                    sleep_json TEXT,
+                    heart_json TEXT,
+                    activity_json TEXT,
+                    spo2_json TEXT,
+                    embedding BLOB,
+                    synced_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_health_date ON health_data(date DESC);
+                PRAGMA user_version = 2;
+                """;
+            health.ExecuteNonQuery();
+        }
     }
 
     public static SqliteConnection CreateConnection(string dbPath)
