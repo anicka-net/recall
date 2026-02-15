@@ -15,8 +15,11 @@ Recall is an [MCP server](https://modelcontextprotocol.io/) that stores diary en
 | `diary_context` | Auto-fetch relevant past entries at conversation start |
 | `diary_write` | Record an entry with optional tags |
 | `diary_query` | Search past entries by meaning (semantic search) |
+| `diary_update` | Edit an existing entry |
 | `diary_list_recent` | List recent entries chronologically |
 | `diary_time` | Current date/time (so the AI knows when it is) |
+| `health_query` | Search health/fitness data (sleep, HR, steps, SpO2) |
+| `health_recent` | Recent health summaries |
 
 ## Quick start
 
@@ -72,19 +75,70 @@ curl -L -o ~/.recall/models/all-MiniLM-L6-v2/vocab.txt \
 
 Without the model files, Recall falls back to substring (LIKE) search.
 
+## Authentication
+
+### Local (Claude Code)
+
+No auth needed. Claude Code connects via stdio transport — it's a local process.
+
+### Remote (claude.ai)
+
+Recall supports OAuth 2.1 with PKCE for remote access. Claude.ai discovers and negotiates auth automatically.
+
+**Setup:**
+
+```bash
+# Set a passphrase for the login form
+dotnet run -- oauth setup
+
+# You'll be prompted for:
+#   1. A passphrase (used when Claude.ai redirects you to authorize)
+#   2. Your server's public URL (e.g. https://example.com)
+```
+
+When Claude.ai connects, it:
+1. Discovers OAuth endpoints via `/.well-known/oauth-protected-resource`
+2. Registers itself as a client
+3. Redirects your browser to a login form
+4. You enter the passphrase once
+5. Claude.ai gets a token and refreshes it automatically
+
+**API keys** (simpler, for non-Claude.ai clients):
+
+```bash
+dotnet run -- key create "my-client"    # Generate a key (shown once)
+dotnet run -- key list                  # List all keys
+dotnet run -- key revoke 3              # Revoke by ID
+```
+
+Both auth methods work simultaneously. Without any keys or OAuth configured, the server runs open (fine for local-only use, not for internet-facing).
+
+## Health data integration
+
+Recall can store daily health summaries from Fitbit (sleep, heart rate, activity, SpO2) and menstrual cycle tracking. The `tools/` directory contains:
+
+| Script | Purpose |
+|--------|---------|
+| `tools/fitbit-sync.py` | Fetch Fitbit data via API, write to recall.db |
+| `tools/fitbit-cron.sh` | Hourly cron job: sync + push to remote |
+| `tools/cycle.py` | Menstrual cycle tracking with predictions |
+
+Health data appears alongside diary entries through the `health_query` and `health_recent` MCP tools.
+
 ## Architecture
 
 ```
 ┌──────────────────────────┐
 │     Recall MCP Server    │
 │ SQLite + vector search   │
+│ OAuth 2.1 / API keys     │
 │  stdio / HTTP transport  │
 └──────────┬───────────────┘
            │ MCP protocol
     ┌──────┴──────┐
-    │ Claude Code │
-    │  claude.ai  │
-    │   any MCP   │
+    │ Claude Code │  (stdio, no auth)
+    │  claude.ai  │  (HTTP + OAuth 2.1)
+    │   any MCP   │  (HTTP + Bearer token)
     │    client   │
     └─────────────┘
 ```
