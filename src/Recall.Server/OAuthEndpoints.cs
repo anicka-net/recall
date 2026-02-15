@@ -299,7 +299,7 @@ public static class OAuthEndpoints
                     <h1>Recall</h1>
                     <p class="subtitle">Authorize access to your diary</p>
                     {{errorHtml}}
-                    <form method="POST" action="/oauth/authorize">
+                    <form method="POST">
                         <input type="hidden" name="client_id" value="{{clientId}}">
                         <input type="hidden" name="redirect_uri" value="{{redirectUri}}">
                         <input type="hidden" name="code_challenge" value="{{codeChallenge}}">
