@@ -432,6 +432,176 @@ public class DiaryDatabase : IDisposable
         return Convert.ToHexStringLower(bytes);
     }
 
+    // ── OAuth 2.1 ─────────────────────────────────────────────
+
+    public string RegisterOAuthClient(string? clientName, string redirectUrisJson)
+    {
+        var clientId = $"client_{GenerateRandomKey(16)}";
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at)
+            VALUES (@id, @name, @uris, @now)
+            """;
+        cmd.Parameters.AddWithValue("@id", clientId);
+        cmd.Parameters.AddWithValue("@name", (object?)clientName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@uris", redirectUrisJson);
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
+        return clientId;
+    }
+
+    public OAuthClientInfo? GetOAuthClient(string clientId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT client_id, client_name, redirect_uris FROM oauth_clients WHERE client_id = @id";
+        cmd.Parameters.AddWithValue("@id", clientId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return new OAuthClientInfo(
+            reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.GetString(2));
+    }
+
+    public string CreateAuthCode(string clientId, string redirectUri, string codeChallenge, string? scope)
+    {
+        var code = GenerateRandomKey(32);
+        var expiresAt = DateTimeOffset.UtcNow.AddMinutes(5).ToString("o");
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, scope, expires_at)
+            VALUES (@code, @client, @uri, @challenge, @scope, @expires)
+            """;
+        cmd.Parameters.AddWithValue("@code", code);
+        cmd.Parameters.AddWithValue("@client", clientId);
+        cmd.Parameters.AddWithValue("@uri", redirectUri);
+        cmd.Parameters.AddWithValue("@challenge", codeChallenge);
+        cmd.Parameters.AddWithValue("@scope", (object?)scope ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@expires", expiresAt);
+        cmd.ExecuteNonQuery();
+        return code;
+    }
+
+    public OAuthCodeInfo? ConsumeAuthCode(string code)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT code, client_id, redirect_uri, code_challenge, scope, expires_at
+            FROM oauth_codes WHERE code = @code AND used = 0
+            """;
+        cmd.Parameters.AddWithValue("@code", code);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+
+        var info = new OAuthCodeInfo(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.GetString(5));
+
+        reader.Close();
+
+        // Check expiry
+        if (DateTimeOffset.Parse(info.ExpiresAt) < DateTimeOffset.UtcNow)
+            return null;
+
+        // Mark as used
+        using var update = _conn.CreateCommand();
+        update.CommandText = "UPDATE oauth_codes SET used = 1 WHERE code = @code";
+        update.Parameters.AddWithValue("@code", code);
+        update.ExecuteNonQuery();
+
+        return info;
+    }
+
+    public OAuthTokenPair CreateTokenPair(string clientId, string? scope)
+    {
+        var accessToken = $"recall_at_{GenerateRandomKey(32)}";
+        var refreshToken = $"recall_rt_{GenerateRandomKey(32)}";
+        var now = DateTimeOffset.UtcNow;
+        var accessExpiry = now.AddHours(1).ToString("o");
+        var refreshExpiry = now.AddDays(30).ToString("o");
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO oauth_tokens (token_hash, client_id, token_type, scope, expires_at, created_at)
+            VALUES (@hash, @client, 'access', @scope, @expires, @now);
+            """;
+        cmd.Parameters.AddWithValue("@hash", HashKey(accessToken));
+        cmd.Parameters.AddWithValue("@client", clientId);
+        cmd.Parameters.AddWithValue("@scope", (object?)scope ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@expires", accessExpiry);
+        cmd.Parameters.AddWithValue("@now", now.ToString("o"));
+        cmd.ExecuteNonQuery();
+
+        using var cmd2 = _conn.CreateCommand();
+        cmd2.CommandText = """
+            INSERT INTO oauth_tokens (token_hash, client_id, token_type, scope, expires_at, created_at)
+            VALUES (@hash, @client, 'refresh', @scope, @expires, @now);
+            """;
+        cmd2.Parameters.AddWithValue("@hash", HashKey(refreshToken));
+        cmd2.Parameters.AddWithValue("@client", clientId);
+        cmd2.Parameters.AddWithValue("@scope", (object?)scope ?? DBNull.Value);
+        cmd2.Parameters.AddWithValue("@expires", refreshExpiry);
+        cmd2.Parameters.AddWithValue("@now", now.ToString("o"));
+        cmd2.ExecuteNonQuery();
+
+        return new OAuthTokenPair(accessToken, refreshToken, 3600);
+    }
+
+    public bool ValidateOAuthToken(string rawToken)
+    {
+        var hash = HashKey(rawToken);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT expires_at FROM oauth_tokens
+            WHERE token_hash = @hash AND token_type = 'access' AND revoked = 0
+            """;
+        cmd.Parameters.AddWithValue("@hash", hash);
+        var result = cmd.ExecuteScalar();
+        if (result is not string expiresAt) return false;
+
+        return DateTimeOffset.Parse(expiresAt) > DateTimeOffset.UtcNow;
+    }
+
+    public string? ConsumeRefreshToken(string rawToken)
+    {
+        var hash = HashKey(rawToken);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT client_id, scope, expires_at FROM oauth_tokens
+            WHERE token_hash = @hash AND token_type = 'refresh' AND revoked = 0
+            """;
+        cmd.Parameters.AddWithValue("@hash", hash);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+
+        var clientId = reader.GetString(0);
+        var expiresAt = reader.GetString(2);
+        reader.Close();
+
+        if (DateTimeOffset.Parse(expiresAt) < DateTimeOffset.UtcNow)
+            return null;
+
+        // Revoke used refresh token (rotation)
+        using var revoke = _conn.CreateCommand();
+        revoke.CommandText = "UPDATE oauth_tokens SET revoked = 1 WHERE token_hash = @hash";
+        revoke.Parameters.AddWithValue("@hash", hash);
+        revoke.ExecuteNonQuery();
+
+        return clientId;
+    }
+
+    public bool HasOAuthTokens()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM oauth_tokens WHERE token_type = 'access' AND revoked = 0";
+        return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
+    }
+
     public void Dispose()
     {
         if (!_disposed)
@@ -451,3 +621,21 @@ public record ApiKeyInfo(
     string CreatedAt,
     string? LastUsed,
     bool Revoked);
+
+public record OAuthClientInfo(
+    string ClientId,
+    string? ClientName,
+    string RedirectUrisJson);
+
+public record OAuthCodeInfo(
+    string Code,
+    string ClientId,
+    string RedirectUri,
+    string CodeChallenge,
+    string? Scope,
+    string ExpiresAt);
+
+public record OAuthTokenPair(
+    string AccessToken,
+    string RefreshToken,
+    int ExpiresIn);

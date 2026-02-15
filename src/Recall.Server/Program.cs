@@ -8,6 +8,10 @@
 //   dotnet run -- key list            # List API keys
 //   dotnet run -- key revoke 3        # Revoke key by ID
 
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -71,6 +75,46 @@ if (args.Length >= 1 && args[0] == "key")
     return 0;
 }
 
+// ── OAuth setup command ──────────────────────────────────────
+if (args.Length >= 2 && args[0] == "oauth" && args[1] == "setup")
+{
+    Console.Write("Enter passphrase for OAuth login: ");
+    var passphrase = Console.ReadLine()?.Trim();
+    if (string.IsNullOrEmpty(passphrase))
+    {
+        Console.WriteLine("Passphrase cannot be empty.");
+        return 1;
+    }
+
+    var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(passphrase)));
+
+    // Read existing config, add/update the hash (preserve all existing values)
+    var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    var configPath = Path.Combine(home, ".recall", "config.json");
+    JsonNode? configNode = null;
+    if (File.Exists(configPath))
+    {
+        try { configNode = JsonNode.Parse(File.ReadAllText(configPath)); }
+        catch { /* start fresh */ }
+    }
+    configNode ??= new JsonObject();
+    var configObj = configNode.AsObject();
+
+    configObj["oAuthPassphraseHash"] = hash;
+    if (!configObj.ContainsKey("oAuthBaseUrl"))
+    {
+        Console.Write("Enter public URL for this server (e.g. https://example.com): ");
+        var baseUrl = Console.ReadLine()?.Trim();
+        if (!string.IsNullOrEmpty(baseUrl))
+            configObj["oAuthBaseUrl"] = baseUrl.TrimEnd('/');
+    }
+
+    File.WriteAllText(configPath, configObj.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+    Console.WriteLine("OAuth passphrase configured.");
+    Console.WriteLine($"Config updated: {configPath}");
+    return 0;
+}
+
 // ── MCP Server ───────────────────────────────────────────────
 var recallConfig = RecallConfig.Load();
 var embeddings = new EmbeddingService(recallConfig.ModelPath);
@@ -95,32 +139,41 @@ if (httpMode)
 
     var app = builder.Build();
 
-    // Auth middleware: check Bearer token if any API keys exist
+    // Auth middleware: check Bearer token (API key or OAuth) for MCP endpoints
     app.Use(async (context, next) =>
     {
-        // Skip auth for health check
-        if (context.Request.Path == "/health")
+        var path = context.Request.Path.Value ?? "";
+
+        // Skip auth for health check, OAuth endpoints, and discovery
+        if (path == "/health"
+            || path.StartsWith("/oauth/")
+            || path.StartsWith("/.well-known/"))
         {
             await next();
             return;
         }
 
-        // Only enforce auth if API keys have been created
-        if (diaryDb.HasApiKeys())
+        // Only enforce auth if API keys or OAuth tokens exist
+        var hasAuth = diaryDb.HasApiKeys() || !string.IsNullOrEmpty(recallConfig.OAuthPassphraseHash);
+        if (hasAuth)
         {
             var authHeader = context.Request.Headers.Authorization.ToString();
             if (!authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
             {
                 context.Response.StatusCode = 401;
-                await context.Response.WriteAsync("Missing Authorization: Bearer <key>");
+                var baseUrl = recallConfig.OAuthBaseUrl ?? $"http://127.0.0.1:{port}";
+                context.Response.Headers["WWW-Authenticate"] =
+                    $"""Bearer resource_metadata="{baseUrl}/.well-known/oauth-protected-resource" """;
+                await context.Response.WriteAsync("Authentication required");
                 return;
             }
 
             var token = authHeader["Bearer ".Length..].Trim();
-            if (!diaryDb.ValidateApiKey(token))
+            // Try API key first, then OAuth token
+            if (!diaryDb.ValidateApiKey(token) && !diaryDb.ValidateOAuthToken(token))
             {
                 context.Response.StatusCode = 403;
-                await context.Response.WriteAsync("Invalid or revoked API key");
+                await context.Response.WriteAsync("Invalid or expired token");
                 return;
             }
         }
@@ -128,12 +181,27 @@ if (httpMode)
         await next();
     });
 
+    // OAuth 2.1 endpoints
+    OAuthEndpoints.Map(app, diaryDb, recallConfig);
+
     app.MapMcp();
     app.MapGet("/health", () => "ok");
 
+    var hasApiKeys = diaryDb.HasApiKeys();
+    var hasOAuth = !string.IsNullOrEmpty(recallConfig.OAuthPassphraseHash);
+    var authStatus = (hasApiKeys, hasOAuth) switch
+    {
+        (true, true) => "API keys + OAuth",
+        (true, false) => "API keys only",
+        (false, true) => "OAuth only",
+        _ => "disabled (run: dotnet run -- oauth setup)",
+    };
+
     Console.Error.WriteLine($"Recall MCP server (HTTP) listening on port {port}");
     Console.Error.WriteLine($"Database: {recallConfig.DatabasePath}");
-    Console.Error.WriteLine($"Auth: {(diaryDb.HasApiKeys() ? "enabled" : "disabled (no API keys created)")}");
+    Console.Error.WriteLine($"Auth: {authStatus}");
+    if (hasOAuth)
+        Console.Error.WriteLine($"OAuth base URL: {recallConfig.OAuthBaseUrl ?? "(not set — run oauth setup)"}");
 
     app.Run($"http://127.0.0.1:{port}");
 }

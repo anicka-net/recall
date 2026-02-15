@@ -9,6 +9,8 @@ public class RecallConfig
     public string SystemPrompt { get; init; } = "";
     public int AutoContextLimit { get; init; } = 5;
     public int SearchResultLimit { get; init; } = 10;
+    public string? OAuthPassphraseHash { get; init; }
+    public string? OAuthBaseUrl { get; init; }
 
     public static RecallConfig Load()
     {
@@ -57,6 +59,8 @@ public class RecallConfig
             SystemPrompt = systemPrompt,
             AutoContextLimit = file?.AutoContextLimit ?? 5,
             SearchResultLimit = file?.SearchResultLimit ?? 10,
+            OAuthPassphraseHash = file?.OAuthPassphraseHash,
+            OAuthBaseUrl = file?.OAuthBaseUrl,
         };
     }
 }
@@ -69,4 +73,6 @@ public class ConfigFile
     public string? PromptFile { get; set; }
     public int? AutoContextLimit { get; set; }
     public int? SearchResultLimit { get; set; }
+    public string? OAuthPassphraseHash { get; set; }
+    public string? OAuthBaseUrl { get; set; }
 }
