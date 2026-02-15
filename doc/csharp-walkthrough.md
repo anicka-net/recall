@@ -315,8 +315,9 @@ transport it's running on.
 **`app.Use(async (context, next) => { ... })`** - ASP.NET **middleware**. A
 function wrapping every HTTP request. `context` has the request/response.
 Calling `next()` passes to the next middleware. Not calling it stops the
-request (returning 401/403). The auth sits in front of `MapMcp()` and
-filters requests before they reach the MCP handler.
+request (returning 401/403). This middleware checks API key Bearer tokens.
+Note: claude.ai doesn't do simple Bearer tokens - it requires OAuth 2.1
+with PKCE (see `oauth-walkthrough.md`). The middleware handles both.
 
 **`async`/`await`** - C#'s async model, similar to Python's `async`/`await`.
 `async` marks a method as asynchronous, `await` suspends until a task
@@ -345,4 +346,5 @@ The design separates concerns through DI:
 
 This is why we could add HTTP mode without touching DiaryTools or
 DiaryDatabase. And why the same tool code serves both Claude Code (stdio)
-and claude.ai (HTTP/SSE) without changes.
+and any HTTP client without changes. (Claude.ai specifically requires
+OAuth 2.1 - see `oauth-walkthrough.md` for that layer.)
