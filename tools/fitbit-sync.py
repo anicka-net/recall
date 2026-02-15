@@ -32,6 +32,8 @@ import numpy as np
 import onnxruntime as ort
 from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, processors
 
+from cycle import build_cycle_summary, ensure_table as ensure_cycle_table
+
 
 # ── Paths ──────────────────────────────────────────────────────
 
@@ -381,6 +383,7 @@ def build_summary(
     activity: dict | None,
     spo2: dict | None,
     baseline_hr: int,
+    cycle_summary: str | None = None,
 ) -> str:
     """Build structured health summary for a given day."""
     dt = datetime.strptime(date, "%Y-%m-%d")
@@ -445,6 +448,10 @@ def build_summary(
         if spo2.get("max") is not None:
             parts.append(f"max {spo2['max']}%")
         lines.append(f"SpO2: {', '.join(parts)}")
+
+    if cycle_summary:
+        lines.append("")
+        lines.append(cycle_summary)
 
     # If we got no data at all, note it
     if not any([sleep, heart, activity, spo2]):
@@ -585,7 +592,16 @@ def sync_day(config: dict, conn: sqlite3.Connection, embedder: EmbeddingService 
         return
 
     baseline_hr = config.get("resting_hr_baseline", 67)
-    summary = build_summary(date, sleep, heart, activity, spo2, baseline_hr)
+
+    # Add cycle context if available
+    cycle_summary = None
+    try:
+        from datetime import date as date_type
+        cycle_summary = build_cycle_summary(conn, date_type.fromisoformat(date))
+    except Exception:
+        pass  # cycle data not imported yet, or table missing — silently skip
+
+    summary = build_summary(date, sleep, heart, activity, spo2, baseline_hr, cycle_summary)
 
     embedding = None
     if embedder:
@@ -612,6 +628,7 @@ def do_sync(config: dict, days: int):
 
     conn = sqlite3.connect(str(DB_PATH))
     ensure_table(conn)
+    ensure_cycle_table(conn)
 
     today = datetime.now().date()
     print(f"Syncing {days} day(s) of Fitbit data...")

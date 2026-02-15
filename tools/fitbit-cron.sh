@@ -26,4 +26,14 @@ sqlite3 "$LOCAL_DB" "
     FROM health_data;
 " | ssh "$REMOTE" "sqlite3 ~/$REMOTE_DB"
 
-echo "Pushed to twilight."
+echo "Pushed health_data to twilight."
+
+# 3. Push cycle_starts to twilight (if table exists)
+if sqlite3 "$LOCAL_DB" "SELECT 1 FROM cycle_starts LIMIT 1" 2>/dev/null; then
+    sqlite3 "$LOCAL_DB" "
+        SELECT 'INSERT OR REPLACE INTO cycle_starts (date, notes, created_at) VALUES ('
+            || quote(date) || ',' || quote(notes) || ',' || quote(created_at) || ');'
+        FROM cycle_starts;
+    " | ssh "$REMOTE" "sqlite3 ~/$REMOTE_DB"
+    echo "Pushed cycle_starts to twilight."
+fi
