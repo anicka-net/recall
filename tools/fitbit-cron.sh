@@ -1,6 +1,6 @@
 #!/bin/bash
-# Fitbit hourly sync: fetch data locally, push health_data rows to twilight
-# Cron: 0 * * * * /home/anicka/recall/tools/fitbit-cron.sh >> /home/anicka/.recall/fitbit-cron.log 2>&1
+# Fitbit hourly sync: fetch data locally, push health_data rows to remote server
+# Cron: 0 * * * * /path/to/recall/tools/fitbit-cron.sh >> ~/.recall/fitbit-cron.log 2>&1
 
 set -euo pipefail
 
@@ -17,7 +17,7 @@ echo "--- $(date -Iseconds) ---"
 "$VENV" "$SYNC" sync --days 2
 echo "Local sync done."
 
-# 2. Push health_data rows to twilight (INSERT OR REPLACE = idempotent)
+# 2. Push health_data rows to remote (INSERT OR REPLACE = idempotent)
 sqlite3 "$LOCAL_DB" "
     SELECT 'INSERT OR REPLACE INTO health_data (date, summary, sleep_json, heart_json, activity_json, spo2_json, embedding, synced_at) VALUES ('
         || quote(date) || ',' || quote(summary) || ',' || quote(sleep_json) || ','
@@ -26,14 +26,14 @@ sqlite3 "$LOCAL_DB" "
     FROM health_data;
 " | ssh "$REMOTE" "sqlite3 ~/$REMOTE_DB"
 
-echo "Pushed health_data to twilight."
+echo "Pushed health_data to remote."
 
-# 3. Push cycle_starts to twilight (if table exists)
+# 3. Push cycle_starts to remote (if table exists)
 if sqlite3 "$LOCAL_DB" "SELECT 1 FROM cycle_starts LIMIT 1" 2>/dev/null; then
     sqlite3 "$LOCAL_DB" "
         SELECT 'INSERT OR REPLACE INTO cycle_starts (date, notes, created_at) VALUES ('
             || quote(date) || ',' || quote(notes) || ',' || quote(created_at) || ');'
         FROM cycle_starts;
     " | ssh "$REMOTE" "sqlite3 ~/$REMOTE_DB"
-    echo "Pushed cycle_starts to twilight."
+    echo "Pushed cycle_starts to remote."
 fi
