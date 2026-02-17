@@ -128,6 +128,7 @@ if (httpMode)
 
     builder.Services.AddSingleton(recallConfig);
     builder.Services.AddSingleton(diaryDb);
+    builder.Services.AddHttpContextAccessor();
     builder.Services.AddScoped<PrivilegeContext>();
 
     builder.Services
@@ -181,8 +182,8 @@ if (httpMode)
             }
 
             // Authenticated sessions are privileged (can see restricted/health data)
-            var privilege = context.RequestServices.GetRequiredService<PrivilegeContext>();
-            privilege.IsPrivileged = true;
+            // Set on HttpContext.Items so it survives MCP library DI scope changes
+            context.Items["Privileged"] = true;
         }
 
         await next();
@@ -226,7 +227,7 @@ else
 
     builder.Services.AddSingleton(recallConfig);
     builder.Services.AddSingleton(diaryDb);
-    builder.Services.AddSingleton(new PrivilegeContext { IsPrivileged = false });
+    builder.Services.AddSingleton(new PrivilegeContext());
 
     builder.Services
         .AddMcpServer(options =>
