@@ -8,7 +8,7 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 VENV="$SCRIPT_DIR/venv/bin/python3"
 SYNC="$SCRIPT_DIR/fitbit-sync.py"
 LOCAL_DB="$HOME/.recall/recall.db"
-REMOTE="your-server.example.com"
+REMOTE="twilight.ucw.cz"
 REMOTE_DB=".recall/recall.db"
 
 echo "--- $(date -Iseconds) ---"
@@ -28,12 +28,15 @@ sqlite3 "$LOCAL_DB" "
 
 echo "Pushed health_data to remote."
 
-# 3. Push cycle_starts to remote (if table exists)
+# 3. Push cycle_starts to remote (if table exists locally)
 if sqlite3 "$LOCAL_DB" "SELECT 1 FROM cycle_starts LIMIT 1" 2>/dev/null; then
-    sqlite3 "$LOCAL_DB" "
-        SELECT 'INSERT OR REPLACE INTO cycle_starts (date, notes, created_at) VALUES ('
-            || quote(date) || ',' || quote(notes) || ',' || quote(created_at) || ');'
-        FROM cycle_starts;
-    " | ssh "$REMOTE" "sqlite3 ~/$REMOTE_DB"
+    {
+        echo "CREATE TABLE IF NOT EXISTS cycle_starts (date TEXT PRIMARY KEY, notes TEXT, created_at TEXT NOT NULL);"
+        sqlite3 "$LOCAL_DB" "
+            SELECT 'INSERT OR REPLACE INTO cycle_starts (date, notes, created_at) VALUES ('
+                || quote(date) || ',' || quote(notes) || ',' || quote(created_at) || ');'
+            FROM cycle_starts;
+        "
+    } | ssh "$REMOTE" "sqlite3 ~/$REMOTE_DB"
     echo "Pushed cycle_starts to remote."
 fi
