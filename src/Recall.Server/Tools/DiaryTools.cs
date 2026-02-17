@@ -24,7 +24,7 @@ public class DiaryTools
         [Description("The diary entry text")] string content,
         [Description("Optional comma-separated tags (e.g. 'work,decision,project-x')")] string? tags = null,
         [Description("Optional conversation ID to group related entries")] string? conversationId = null,
-        [Description("Mark entry as restricted (only visible to privileged sessions)")] bool restricted = false)
+        [Description("Set false to make entry visible to all sessions (default: restricted for authenticated sessions, unrestricted for stdio)")] bool restricted = true)
     {
         // Auto-prepend date header if not already present
         if (!content.StartsWith("**Date:", StringComparison.OrdinalIgnoreCase)
@@ -35,12 +35,13 @@ public class DiaryTools
             content = $"{dateHeader}\n\n{content}";
         }
 
-        // Only privileged sessions can mark entries as restricted
-        if (restricted && !privilege.IsPrivileged)
+        // Unprivileged sessions always write unrestricted (they can't read restricted anyway)
+        // Privileged sessions default to restricted, can explicitly set restricted=false
+        if (!privilege.IsPrivileged)
             restricted = false;
 
         var id = db.WriteEntry(content, tags, conversationId, restricted: restricted);
-        return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}.";
+        return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}{(restricted ? " [restricted]" : "")}.";
     }
 
     [McpServerTool(Name = "diary_update")]
