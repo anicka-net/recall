@@ -136,7 +136,8 @@ if (httpMode)
             options.ServerInfo = new() { Name = "recall", Version = "1.0.0" };
         })
         .WithHttpTransport()
-        .WithToolsFromAssembly();
+        .WithTools<Recall.Server.Tools.DiaryTools>()
+        .WithTools<Recall.Server.Tools.HealthTools>();
 
     var app = builder.Build();
 
@@ -233,7 +234,7 @@ else
             options.ServerInfo = new() { Name = "recall", Version = "1.0.0" };
         })
         .WithStdioServerTransport()
-        .WithToolsFromAssembly();
+        .WithTools<Recall.Server.Tools.DiaryTools>();
 
     await builder.Build().RunAsync();
 }
