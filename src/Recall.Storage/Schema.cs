@@ -147,6 +147,17 @@ public static class Schema
                 """;
             oauth.ExecuteNonQuery();
         }
+
+        if (version < 4)
+        {
+            // Privilege separation: restricted entries only visible with secret
+            using var restrict = connection.CreateCommand();
+            restrict.CommandText = """
+                ALTER TABLE entries ADD COLUMN restricted INTEGER NOT NULL DEFAULT 0;
+                PRAGMA user_version = 4;
+                """;
+            restrict.ExecuteNonQuery();
+        }
     }
 
     public static SqliteConnection CreateConnection(string dbPath)

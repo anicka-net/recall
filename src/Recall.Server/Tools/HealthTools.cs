@@ -13,9 +13,13 @@ public partial class HealthTools
                  "Use natural language like 'sleep quality this week' or a date like '2026-02-10'.")]
     public static string Query(
         DiaryDatabase db,
+        PrivilegeContext privilege,
         [Description("Search query or date (YYYY-MM-DD)")] string query,
         [Description("Max results (default 7)")] int limit = 7)
     {
+        if (!privilege.IsPrivileged)
+            return "Health data is restricted to authenticated sessions.";
+
         // Detect date pattern for exact lookup
         if (DatePattern().IsMatch(query.Trim()))
         {
@@ -36,8 +40,12 @@ public partial class HealthTools
     [Description("Show recent health/fitness summaries (sleep, heart rate, activity).")]
     public static string Recent(
         DiaryDatabase db,
+        PrivilegeContext privilege,
         [Description("Number of days (default 7)")] int days = 7)
     {
+        if (!privilege.IsPrivileged)
+            return "Health data is restricted to authenticated sessions.";
+
         var results = db.GetRecentHealth(days);
         if (results.Count == 0)
             return "No health data available. Run fitbit-sync.py to import data.";

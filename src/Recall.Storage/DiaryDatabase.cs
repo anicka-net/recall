@@ -22,8 +22,15 @@ public class DiaryDatabase : IDisposable
         _embeddings = embeddings;
     }
 
+    public bool ValidateRestrictionSecret(string? secret, string? secretHash)
+    {
+        if (string.IsNullOrEmpty(secret) || string.IsNullOrEmpty(secretHash))
+            return false;
+        return HashKey(secret) == secretHash;
+    }
+
     public int WriteEntry(string content, string? tags = null, string? conversationId = null,
-        string source = "claude-code")
+        string source = "claude-code", bool restricted = false)
     {
         // Combine content and tags for embedding (tags add searchable context)
         var textToEmbed = string.IsNullOrEmpty(tags) ? content : $"{content}\n{tags}";
@@ -36,8 +43,8 @@ public class DiaryDatabase : IDisposable
 
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO entries (created_at, content, tags, conversation_id, source, embedding)
-            VALUES (@now, @content, @tags, @cid, @source, @emb);
+            INSERT INTO entries (created_at, content, tags, conversation_id, source, embedding, restricted)
+            VALUES (@now, @content, @tags, @cid, @source, @emb, @restricted);
             SELECT last_insert_rowid();
             """;
         cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
@@ -46,6 +53,7 @@ public class DiaryDatabase : IDisposable
         cmd.Parameters.AddWithValue("@cid", (object?)conversationId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@source", source);
         cmd.Parameters.AddWithValue("@emb", (object?)embeddingBlob ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@restricted", restricted ? 1 : 0);
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
@@ -81,31 +89,32 @@ public class DiaryDatabase : IDisposable
         return cmd.ExecuteNonQuery() > 0;
     }
 
-    public List<DiaryEntry> Search(string query, int limit = 10)
+    public List<DiaryEntry> Search(string query, int limit = 10, bool includeRestricted = false)
     {
         if (string.IsNullOrWhiteSpace(query))
-            return GetRecent(limit);
+            return GetRecent(limit, includeRestricted);
 
         // Vector search if embeddings are available
         if (_embeddings is { IsAvailable: true })
         {
-            try { return VectorSearch(query, limit); }
+            try { return VectorSearch(query, limit, includeRestricted); }
             catch { /* fall through to LIKE */ }
         }
 
-        return SearchLike(query, limit);
+        return SearchLike(query, limit, includeRestricted);
     }
 
-    private List<DiaryEntry> VectorSearch(string query, int limit)
+    private List<DiaryEntry> VectorSearch(string query, int limit, bool includeRestricted = false)
     {
         var queryEmbedding = _embeddings!.Embed(query);
 
         // Load all entries that have embeddings
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
+        var restrictFilter = includeRestricted ? "" : " AND restricted = 0";
+        cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id, embedding
             FROM entries
-            WHERE embedding IS NOT NULL
+            WHERE embedding IS NOT NULL{restrictFilter}
             """;
 
         var scored = new List<(DiaryEntry Entry, float Score)>();
@@ -132,12 +141,14 @@ public class DiaryDatabase : IDisposable
             .ToList();
     }
 
-    public List<DiaryEntry> GetRecent(int count = 10)
+    public List<DiaryEntry> GetRecent(int count = 10, bool includeRestricted = false)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
+        var restrictFilter = includeRestricted ? "" : "WHERE restricted = 0";
+        cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id
             FROM entries
+            {restrictFilter}
             ORDER BY created_at DESC
             LIMIT @count
             """;
@@ -152,13 +163,14 @@ public class DiaryDatabase : IDisposable
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
-    private List<DiaryEntry> SearchLike(string query, int limit)
+    private List<DiaryEntry> SearchLike(string query, int limit, bool includeRestricted = false)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
+        var restrictFilter = includeRestricted ? "" : "AND restricted = 0";
+        cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id
             FROM entries
-            WHERE content LIKE @pattern OR tags LIKE @pattern
+            WHERE (content LIKE @pattern OR tags LIKE @pattern) {restrictFilter}
             ORDER BY created_at DESC
             LIMIT @limit
             """;

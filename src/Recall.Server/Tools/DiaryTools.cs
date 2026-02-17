@@ -19,9 +19,12 @@ public class DiaryTools
     [Description("Write a diary entry. Record thoughts, events, decisions, insights, or anything worth remembering. Be specific and detailed.")]
     public static string Write(
         DiaryDatabase db,
+        RecallConfig config,
+        PrivilegeContext privilege,
         [Description("The diary entry text")] string content,
         [Description("Optional comma-separated tags (e.g. 'work,decision,project-x')")] string? tags = null,
-        [Description("Optional conversation ID to group related entries")] string? conversationId = null)
+        [Description("Optional conversation ID to group related entries")] string? conversationId = null,
+        [Description("Mark entry as restricted (only visible to privileged sessions)")] bool restricted = false)
     {
         // Auto-prepend date header if not already present
         if (!content.StartsWith("**Date:", StringComparison.OrdinalIgnoreCase)
@@ -32,7 +35,11 @@ public class DiaryTools
             content = $"{dateHeader}\n\n{content}";
         }
 
-        var id = db.WriteEntry(content, tags, conversationId);
+        // Only privileged sessions can mark entries as restricted
+        if (restricted && !privilege.IsPrivileged)
+            restricted = false;
+
+        var id = db.WriteEntry(content, tags, conversationId, restricted: restricted);
         return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}.";
     }
 
@@ -57,11 +64,12 @@ public class DiaryTools
     public static string Query(
         DiaryDatabase db,
         RecallConfig config,
+        PrivilegeContext privilege,
         [Description("Search words or phrase")] string query,
         [Description("Max results to return (default: from config)")] int limit = 0)
     {
         var effectiveLimit = limit > 0 ? limit : config.SearchResultLimit;
-        var results = db.Search(query, effectiveLimit);
+        var results = db.Search(query, effectiveLimit, privilege.IsPrivileged);
         if (results.Count == 0)
             return "No entries found matching your query.";
 
@@ -73,13 +81,14 @@ public class DiaryTools
     public static string GetContext(
         DiaryDatabase db,
         RecallConfig config,
+        PrivilegeContext privilege,
         [Description("Brief summary of what this conversation is about")] string topic)
     {
         var conversationId = Guid.NewGuid().ToString("N")[..12];
         var limit = config.AutoContextLimit;
 
-        var recent = db.GetRecent(3);
-        var relevant = db.Search(topic, limit);
+        var recent = db.GetRecent(3, privilege.IsPrivileged);
+        var relevant = db.Search(topic, limit, privilege.IsPrivileged);
 
         // Merge and deduplicate
         var seen = new HashSet<int>();
@@ -110,9 +119,10 @@ public class DiaryTools
     [Description("List the most recent diary entries in chronological order.")]
     public static string ListRecent(
         DiaryDatabase db,
+        PrivilegeContext privilege,
         [Description("Number of entries to return (default: 10)")] int count = 10)
     {
-        var entries = db.GetRecent(count);
+        var entries = db.GetRecent(count, privilege.IsPrivileged);
         if (entries.Count == 0)
             return "No diary entries yet.";
 

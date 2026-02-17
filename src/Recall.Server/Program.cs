@@ -128,6 +128,7 @@ if (httpMode)
 
     builder.Services.AddSingleton(recallConfig);
     builder.Services.AddSingleton(diaryDb);
+    builder.Services.AddScoped<PrivilegeContext>();
 
     builder.Services
         .AddMcpServer(options =>
@@ -140,6 +141,7 @@ if (httpMode)
     var app = builder.Build();
 
     // Auth middleware: check Bearer token (API key or OAuth) for MCP endpoints
+    // Authenticated sessions get elevated privileges (can see restricted data)
     app.Use(async (context, next) =>
     {
         var path = context.Request.Path.Value ?? "";
@@ -176,6 +178,10 @@ if (httpMode)
                 await context.Response.WriteAsync("Invalid or expired token");
                 return;
             }
+
+            // Authenticated sessions are privileged (can see restricted/health data)
+            var privilege = context.RequestServices.GetRequiredService<PrivilegeContext>();
+            privilege.IsPrivileged = true;
         }
 
         await next();
@@ -219,6 +225,7 @@ else
 
     builder.Services.AddSingleton(recallConfig);
     builder.Services.AddSingleton(diaryDb);
+    builder.Services.AddSingleton(new PrivilegeContext { IsPrivileged = false });
 
     builder.Services
         .AddMcpServer(options =>
