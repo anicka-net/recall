@@ -20,12 +20,16 @@ public class DiaryTools
     public static string Write(
         DiaryDatabase db,
         RecallConfig config,
-        PrivilegeContext privilege,
         [Description("The diary entry text")] string content,
         [Description("Optional comma-separated tags (e.g. 'work,decision,project-x')")] string? tags = null,
         [Description("Optional conversation ID to group related entries")] string? conversationId = null,
-        [Description("Set true to restrict entry to privileged sessions only (default: unrestricted)")] bool restricted = false)
+        [Description("Set false to make entry visible to all sessions (default: restricted for authenticated sessions, unrestricted for stdio)")] bool restricted = true,
+        [Description("Access secret")] string? secret = null)
     {
+        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
         // Auto-prepend date header if not already present
         if (!content.StartsWith("**Date:", StringComparison.OrdinalIgnoreCase)
             && !content.StartsWith("Date:", StringComparison.OrdinalIgnoreCase))
@@ -35,8 +39,8 @@ public class DiaryTools
             content = $"{dateHeader}\n\n{content}";
         }
 
-        // Unprivileged sessions can't write restricted (they can't read restricted anyway)
-        if (!privilege.IsPrivileged)
+        // Only guardian can write restricted entries
+        if (access != AccessLevel.Guardian)
             restricted = false;
 
         var id = db.WriteEntry(content, tags, conversationId, restricted: restricted);
@@ -47,10 +51,20 @@ public class DiaryTools
     [Description("Update an existing diary entry. Replaces the content and tags of the specified entry. The created_at timestamp is preserved.")]
     public static string Update(
         DiaryDatabase db,
+        RecallConfig config,
         [Description("The ID of the entry to update")] int id,
         [Description("The new content for the entry")] string content,
-        [Description("Optional new tags (replaces existing tags)")] string? tags = null)
+        [Description("Optional new tags (replaces existing tags)")] string? tags = null,
+        [Description("Access secret")] string? secret = null)
     {
+        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
+        // Coding can't edit restricted entries
+        if (access == AccessLevel.Coding && db.IsEntryRestricted(id))
+            return $"Entry #{id} is restricted. Guardian access required to edit.";
+
         var success = db.UpdateEntry(id, content, tags);
         if (!success)
             return $"Entry #{id} not found.";
@@ -64,12 +78,16 @@ public class DiaryTools
     public static string Query(
         DiaryDatabase db,
         RecallConfig config,
-        PrivilegeContext privilege,
         [Description("Search words or phrase")] string query,
-        [Description("Max results to return (default: from config)")] int limit = 0)
+        [Description("Max results to return (default: from config)")] int limit = 0,
+        [Description("Access secret")] string? secret = null)
     {
+        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
         var effectiveLimit = limit > 0 ? limit : config.SearchResultLimit;
-        var results = db.Search(query, effectiveLimit, privilege.IsPrivileged);
+        var results = db.Search(query, effectiveLimit, includeRestricted: access == AccessLevel.Guardian);
         if (results.Count == 0)
             return "No entries found matching your query.";
 
@@ -81,14 +99,19 @@ public class DiaryTools
     public static string GetContext(
         DiaryDatabase db,
         RecallConfig config,
-        PrivilegeContext privilege,
-        [Description("Brief summary of what this conversation is about")] string topic)
+        [Description("Brief summary of what this conversation is about")] string topic,
+        [Description("Access secret")] string? secret = null)
     {
+        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
         var conversationId = Guid.NewGuid().ToString("N")[..12];
         var limit = config.AutoContextLimit;
+        var includeRestricted = access == AccessLevel.Guardian;
 
-        var recent = db.GetRecent(3, privilege.IsPrivileged);
-        var relevant = db.Search(topic, limit, privilege.IsPrivileged);
+        var recent = db.GetRecent(3, includeRestricted);
+        var relevant = db.Search(topic, limit, includeRestricted);
 
         // Merge and deduplicate
         var seen = new HashSet<int>();
@@ -119,10 +142,15 @@ public class DiaryTools
     [Description("List the most recent diary entries in chronological order.")]
     public static string ListRecent(
         DiaryDatabase db,
-        PrivilegeContext privilege,
-        [Description("Number of entries to return (default: 10)")] int count = 10)
+        RecallConfig config,
+        [Description("Number of entries to return (default: 10)")] int count = 10,
+        [Description("Access secret")] string? secret = null)
     {
-        var entries = db.GetRecent(count, privilege.IsPrivileged);
+        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
+        var entries = db.GetRecent(count, includeRestricted: access == AccessLevel.Guardian);
         if (entries.Count == 0)
             return "No diary entries yet.";
 

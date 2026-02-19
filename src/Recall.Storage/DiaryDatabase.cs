@@ -3,6 +3,8 @@ using Microsoft.Data.Sqlite;
 
 namespace Recall.Storage;
 
+public enum AccessLevel { None, Coding, Guardian }
+
 public record DiaryEntry(
     int Id,
     DateTimeOffset CreatedAt,
@@ -22,11 +24,25 @@ public class DiaryDatabase : IDisposable
         _embeddings = embeddings;
     }
 
-    public bool ValidateRestrictionSecret(string? secret, string? secretHash)
+    public AccessLevel ResolveAccess(string? secret, string? guardianHash, string? codingHash)
     {
-        if (string.IsNullOrEmpty(secret) || string.IsNullOrEmpty(secretHash))
-            return false;
-        return HashKey(secret) == secretHash;
+        if (string.IsNullOrEmpty(secret))
+            return AccessLevel.None;
+        var hash = HashKey(secret);
+        if (!string.IsNullOrEmpty(guardianHash) && hash == guardianHash)
+            return AccessLevel.Guardian;
+        if (!string.IsNullOrEmpty(codingHash) && hash == codingHash)
+            return AccessLevel.Coding;
+        return AccessLevel.None;
+    }
+
+    public bool IsEntryRestricted(int id)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT restricted FROM entries WHERE id = @id";
+        cmd.Parameters.AddWithValue("@id", id);
+        var result = cmd.ExecuteScalar();
+        return result is long v && v != 0;
     }
 
     public int WriteEntry(string content, string? tags = null, string? conversationId = null,

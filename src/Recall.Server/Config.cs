@@ -11,7 +11,8 @@ public class RecallConfig
     public int SearchResultLimit { get; init; } = 10;
     public string? OAuthPassphraseHash { get; init; }
     public string? OAuthBaseUrl { get; init; }
-    public string? RestrictionSecretHash { get; init; }
+    public string? GuardianSecretHash { get; init; }
+    public string? CodingSecretHash { get; init; }
 
     public static RecallConfig Load()
     {
@@ -62,7 +63,8 @@ public class RecallConfig
             SearchResultLimit = file?.SearchResultLimit ?? 10,
             OAuthPassphraseHash = file?.OAuthPassphraseHash,
             OAuthBaseUrl = file?.OAuthBaseUrl,
-            RestrictionSecretHash = file?.RestrictionSecretHash,
+            GuardianSecretHash = file?.GuardianSecretHash,
+            CodingSecretHash = file?.CodingSecretHash,
         };
     }
 }
@@ -77,5 +79,6 @@ public class ConfigFile
     public int? SearchResultLimit { get; set; }
     public string? OAuthPassphraseHash { get; set; }
     public string? OAuthBaseUrl { get; set; }
-    public string? RestrictionSecretHash { get; set; }
+    public string? GuardianSecretHash { get; set; }
+    public string? CodingSecretHash { get; set; }
 }

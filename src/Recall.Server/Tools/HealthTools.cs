@@ -13,12 +13,14 @@ public partial class HealthTools
                  "Use natural language like 'sleep quality this week' or a date like '2026-02-10'.")]
     public static string Query(
         DiaryDatabase db,
-        PrivilegeContext privilege,
+        RecallConfig config,
         [Description("Search query or date (YYYY-MM-DD)")] string query,
-        [Description("Max results (default 7)")] int limit = 7)
+        [Description("Max results (default 7)")] int limit = 7,
+        [Description("Access secret")] string? secret = null)
     {
-        if (!privilege.IsPrivileged)
-            return "Health data is restricted to authenticated sessions.";
+        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        if (access != AccessLevel.Guardian)
+            return "Health data requires guardian access.";
 
         // Detect date pattern for exact lookup
         if (DatePattern().IsMatch(query.Trim()))
@@ -40,11 +42,13 @@ public partial class HealthTools
     [Description("Show recent health/fitness summaries (sleep, heart rate, activity).")]
     public static string Recent(
         DiaryDatabase db,
-        PrivilegeContext privilege,
-        [Description("Number of days (default 7)")] int days = 7)
+        RecallConfig config,
+        [Description("Number of days (default 7)")] int days = 7,
+        [Description("Access secret")] string? secret = null)
     {
-        if (!privilege.IsPrivileged)
-            return "Health data is restricted to authenticated sessions.";
+        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        if (access != AccessLevel.Guardian)
+            return "Health data requires guardian access.";
 
         var results = db.GetRecentHealth(days);
         if (results.Count == 0)
