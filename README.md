@@ -8,7 +8,7 @@ Recall gives Claude (or any MCP-compatible AI) access to your past conversations
 
 ## How it works
 
-Recall is an [MCP server](https://modelcontextprotocol.io/) that stores diary entries in SQLite with vector embeddings for semantic search (all-MiniLM-L6-v2 via ONNX Runtime). It exposes five tools:
+Recall is an [MCP server](https://modelcontextprotocol.io/) that stores diary entries in SQLite with vector embeddings for semantic search (all-MiniLM-L6-v2 via ONNX Runtime). Tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -75,43 +75,88 @@ curl -L -o ~/.recall/models/all-MiniLM-L6-v2/vocab.txt \
 
 Without the model files, Recall falls back to substring (LIKE) search.
 
-## Authentication
+## Authentication and access control
 
-### Local (Claude Code)
+Recall has two layers of auth: **transport-level** (who can connect) and **tool-level** (what they can see).
 
-No auth needed. Claude Code connects via stdio transport — it's a local process.
+### Transport: local vs. remote
 
-### Remote (claude.ai)
+**Local (stdio):** Claude Code connects via stdio — no transport auth needed.
 
-Recall supports OAuth 2.1 with PKCE for remote access. Claude.ai discovers and negotiates auth automatically.
-
-**Setup:**
+**Remote (HTTP):** OAuth 2.1 with PKCE or API keys control who can connect at all.
 
 ```bash
-# Set a passphrase for the login form
+# OAuth setup (for claude.ai)
 dotnet run -- oauth setup
+# Prompts for a passphrase and your server's public URL
 
-# You'll be prompted for:
-#   1. A passphrase (used when Claude.ai redirects you to authorize)
-#   2. Your server's public URL (e.g. https://example.com)
-```
-
-When Claude.ai connects, it:
-1. Discovers OAuth endpoints via `/.well-known/oauth-protected-resource`
-2. Registers itself as a client
-3. Redirects your browser to a login form
-4. You enter the passphrase once
-5. Claude.ai gets a token and refreshes it automatically
-
-**API keys** (simpler, for non-Claude.ai clients):
-
-```bash
+# API keys (for other clients)
 dotnet run -- key create "my-client"    # Generate a key (shown once)
 dotnet run -- key list                  # List all keys
 dotnet run -- key revoke 3              # Revoke by ID
 ```
 
-Both auth methods work simultaneously. Without any keys or OAuth configured, the server runs open (fine for local-only use, not for internet-facing).
+Both methods work simultaneously. Without any configured, the server runs open.
+
+### Tool-level: three-tier access
+
+Every tool call (except `diary_time`) requires a `secret` parameter. The server hashes it and compares against two configured hashes to determine the access level:
+
+| Level | Diary | Health | Write restricted |
+|-------|-------|--------|------------------|
+| **Guardian** | all entries | yes | yes |
+| **Coding** | unrestricted only | no | no |
+| **None** (no/bad secret) | rejected | rejected | rejected |
+
+Configure in `~/.recall/config.json`:
+
+```json
+{
+  "guardianSecretHash": "<sha256 of guardian passphrase>",
+  "codingSecretHash": "<sha256 of coding passphrase>"
+}
+```
+
+Generate hashes with: `echo -n "your-passphrase" | sha256sum`
+
+**Injecting the secret into Claude Code** — use a [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that adds the coding secret to every Recall tool call. Example `~/.claude/hooks/recall-secret.sh`:
+
+```bash
+#!/bin/bash
+INPUT=$(cat)
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name')
+
+# diary_time needs no secret
+if [ "$TOOL_NAME" = "mcp__claude_ai_Recall__diary_time" ]; then
+    exit 0
+fi
+
+TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input')
+UPDATED=$(echo "$TOOL_INPUT" | jq '. + {"secret": "YOUR_CODING_SECRET"}')
+
+jq -n --argjson updated "$UPDATED" '{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "updatedInput": $updated
+  }
+}'
+```
+
+Register it in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "mcp__claude_ai_Recall__.*",
+      "hooks": [{"type": "command", "command": "/path/to/recall-secret.sh"}]
+    }]
+  }
+}
+```
+
+For claude.ai (guardian), include the guardian secret in the system prompt with instructions to pass it as the `secret` parameter on every tool call.
 
 ## Health data integration
 
@@ -124,6 +169,59 @@ Recall can store daily health summaries from Fitbit (sleep, heart rate, activity
 | `tools/cycle.py` | Menstrual cycle tracking with predictions |
 
 Health data appears alongside diary entries through the `health_query` and `health_recent` MCP tools.
+
+## Deployment
+
+### Local (stdio)
+
+Just register with Claude Code as shown in Quick Start. No server process needed.
+
+### Remote (HTTP)
+
+Publish a self-contained binary and run it as a service.
+
+```bash
+# Build
+dotnet publish src/Recall.Server/Recall.Server.csproj \
+    -c Release -o publish/
+
+# Run
+./publish/Recall.Server --http --port 3000
+```
+
+**systemd service** (`/etc/systemd/system/recall.service`):
+
+```ini
+[Unit]
+Description=Recall MCP Server
+After=network.target
+
+[Service]
+Type=exec
+User=recall
+ExecStart=/opt/recall/Recall.Server --http --port 3000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now recall
+```
+
+Put a reverse proxy (nginx/caddy) in front for TLS. Claude.ai requires HTTPS.
+
+### Updating a running server
+
+```bash
+dotnet publish src/Recall.Server/Recall.Server.csproj -c Release -o publish/
+# Copy publish/ to the server, then:
+sudo systemctl restart recall
+```
+
+The SQLite database is preserved across restarts. Schema migrations run automatically on startup.
 
 ## Architecture
 
