@@ -24,7 +24,7 @@ public class DiaryTools
         [Description("The diary entry text")] string content,
         [Description("Optional comma-separated tags (e.g. 'work,decision,project-x')")] string? tags = null,
         [Description("Optional conversation ID to group related entries")] string? conversationId = null,
-        [Description("Set false to make entry visible to all sessions (default: restricted for authenticated sessions, unrestricted for stdio)")] bool restricted = true)
+        [Description("Set true to restrict entry to privileged sessions only (default: unrestricted)")] bool restricted = false)
     {
         // Auto-prepend date header if not already present
         if (!content.StartsWith("**Date:", StringComparison.OrdinalIgnoreCase)
@@ -35,8 +35,7 @@ public class DiaryTools
             content = $"{dateHeader}\n\n{content}";
         }
 
-        // Unprivileged sessions always write unrestricted (they can't read restricted anyway)
-        // Privileged sessions default to restricted, can explicitly set restricted=false
+        // Unprivileged sessions can't write restricted (they can't read restricted anyway)
         if (!privilege.IsPrivileged)
             restricted = false;
 
