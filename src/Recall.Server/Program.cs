@@ -210,25 +210,31 @@ if (httpMode)
 else
 {
     // stdio transport - for Claude Code local connection
-    var builder = Host.CreateApplicationBuilder(args);
+    // Use HostBuilder directly to avoid FileSystemWatcher overhead from default config system
+    var builder = new HostBuilder();
 
-    // CRITICAL: stdout is MCP protocol only. Kill ALL default loggers, add stderr-only.
-    builder.Logging.ClearProviders();
-    builder.Logging.AddConsole(options =>
+    builder.ConfigureLogging(logging =>
     {
-        options.LogToStandardErrorThreshold = LogLevel.Trace;
+        logging.ClearProviders();
+        logging.AddConsole(options =>
+        {
+            options.LogToStandardErrorThreshold = LogLevel.Trace;
+        });
     });
 
-    builder.Services.AddSingleton(recallConfig);
-    builder.Services.AddSingleton(diaryDb);
+    builder.ConfigureServices(services =>
+    {
+        services.AddSingleton(recallConfig);
+        services.AddSingleton(diaryDb);
 
-    builder.Services
-        .AddMcpServer(options =>
-        {
-            options.ServerInfo = new() { Name = "recall", Version = "1.0.0" };
-        })
-        .WithStdioServerTransport()
-        .WithTools<Recall.Server.Tools.DiaryTools>();
+        services
+            .AddMcpServer(options =>
+            {
+                options.ServerInfo = new() { Name = "recall", Version = "1.0.0" };
+            })
+            .WithStdioServerTransport()
+            .WithTools<Recall.Server.Tools.DiaryTools>();
+    });
 
     await builder.Build().RunAsync();
 }
