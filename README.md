@@ -178,12 +178,15 @@ Just register with Claude Code as shown in Quick Start. No server process needed
 
 ### Remote (HTTP)
 
-Publish a self-contained binary and run it as a service.
+Publish a **self-contained** binary and run it as a service. Framework-dependent builds won't work unless the exact .NET runtime is installed on the server.
 
 ```bash
-# Build
+# Build (self-contained for Linux x64)
 dotnet publish src/Recall.Server/Recall.Server.csproj \
-    -c Release -o publish/
+    -c Release --self-contained -r linux-x64 -o publish/
+
+# Copy to server
+rsync -av publish/ server:~/recall-server/
 
 # Run
 ./publish/Recall.Server --http --port 3000
@@ -199,9 +202,11 @@ After=network.target
 [Service]
 Type=exec
 User=recall
+WorkingDirectory=/opt/recall
 ExecStart=/opt/recall/Recall.Server --http --port 3000
 Restart=on-failure
 RestartSec=5
+Environment=DOTNET_ENVIRONMENT=Production
 
 [Install]
 WantedBy=multi-user.target
@@ -211,34 +216,128 @@ WantedBy=multi-user.target
 sudo systemctl enable --now recall
 ```
 
-Put a reverse proxy (nginx/caddy) in front for TLS. Claude.ai requires HTTPS.
+Put a reverse proxy (Apache/nginx/Caddy) in front for TLS. Claude.ai requires HTTPS.
 
 ### Updating a running server
 
 ```bash
-dotnet publish src/Recall.Server/Recall.Server.csproj -c Release -o publish/
-# Copy publish/ to the server, then:
+dotnet publish src/Recall.Server/Recall.Server.csproj \
+    -c Release --self-contained -r linux-x64 -o publish/
+rsync -av publish/ server:~/recall-server/
+# On the server:
 sudo systemctl restart recall
 ```
 
 The SQLite database is preserved across restarts. Schema migrations run automatically on startup.
 
+### Proxying external MCP servers
+
+Recall can act as an OAuth gateway for other MCP servers. Any stdio-based MCP server wrapped in [supergateway](https://www.npmjs.com/package/supergateway) can be proxied through Recall's existing auth — no additional OAuth setup needed.
+
+**How it works:**
+
+```
+claude.ai ──HTTPS──▶ reverse proxy ──▶ Recall ──▶ supergateway ──▶ stdio MCP server
+                                    (OAuth gate)   (Streamable HTTP)
+```
+
+**Step 1: Set up the external MCP server with supergateway**
+
+```bash
+# Install on the server
+mkdir -p ~/my-mcp && cd ~/my-mcp
+npm init -y
+npm install supergateway @some/mcp-server
+
+# Create credentials file (if needed)
+cat > ~/.config/my-mcp.env << 'EOF'
+MY_USERNAME=user@example.com
+MY_PASSWORD=secret
+EOF
+chmod 600 ~/.config/my-mcp.env
+```
+
+**Step 2: Create a systemd user unit**
+
+```ini
+# ~/.config/systemd/user/my-mcp.service
+[Unit]
+Description=My MCP Server (supergateway)
+After=network.target
+
+[Service]
+Type=exec
+EnvironmentFile=%h/.config/my-mcp.env
+ExecStart=/usr/bin/npx --prefix %h/my-mcp supergateway \
+    --stdio "node %h/my-mcp/node_modules/@some/mcp-server/dist/index.js" \
+    --port 8385 \
+    --outputTransport streamableHttp \
+    --streamableHttpPath /mcp \
+    --logLevel info
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now my-mcp
+loginctl enable-linger  # persist after logout
+```
+
+**Step 3: Add the proxy to Recall's config**
+
+In `~/.recall/config.json`:
+
+```json
+{
+  "mcpProxies": [
+    { "prefix": "my-mcp", "target": "http://127.0.0.1:8385" }
+  ]
+}
+```
+
+Restart Recall. Tools are now available at `https://your-server/recall/my-mcp/mcp` using the same OAuth token.
+
+**Step 4: Add a claude.ai connector**
+
+In claude.ai settings, add an MCP connector with URL:
+
+```
+https://your-server/recall/my-mcp/mcp
+```
+
+It uses the same OAuth passphrase as Recall — no separate auth setup.
+
+**Important notes:**
+
+- Use `--outputTransport streamableHttp` in supergateway — claude.ai prefers Streamable HTTP over SSE
+- No proxy config is needed in Apache/nginx — the existing `/recall/` proxy rule covers all subpaths
+- When `mcpProxies` is absent or empty, zero proxy code runs — no impact on Recall
+- Credentials for external services go in env files, never in Recall's config or repo
+
 ## Architecture
 
 ```
-┌──────────────────────────┐
-│     Recall MCP Server    │
-│ SQLite + vector search   │
-│ OAuth 2.1 / API keys     │
-│  stdio / HTTP transport  │
-└──────────┬───────────────┘
-           │ MCP protocol
-    ┌──────┴──────┐
-    │ Claude Code │  (stdio, no auth)
-    │  claude.ai  │  (HTTP + OAuth 2.1)
-    │   any MCP   │  (HTTP + Bearer token)
-    │    client   │
-    └─────────────┘
+┌──────────────────────────────────────┐
+│          Recall MCP Server           │
+│  SQLite + vector search + OAuth 2.1  │
+│                                      │
+│  /sse, /message  →  diary & health   │
+│  /{prefix}/*     →  proxy to backend │
+└─────────┬────────────────┬───────────┘
+          │                │
+    MCP protocol     reverse proxy
+          │                │
+  ┌───────┴───────┐  ┌─────┴──────────┐
+  │  Claude Code  │  │  supergateway  │
+  │   claude.ai   │  │  (port 8385)   │
+  │   any client  │  │       │        │
+  └───────────────┘  │  stdio MCP     │
+                     │  server        │
+                     └────────────────┘
 ```
 
 ## Building
