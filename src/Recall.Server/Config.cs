@@ -13,6 +13,7 @@ public class RecallConfig
     public string? OAuthBaseUrl { get; init; }
     public string? GuardianSecretHash { get; init; }
     public string? CodingSecretHash { get; init; }
+    public List<McpProxyEntry> McpProxies { get; init; } = [];
 
     public static RecallConfig Load()
     {
@@ -65,8 +66,15 @@ public class RecallConfig
             OAuthBaseUrl = file?.OAuthBaseUrl,
             GuardianSecretHash = file?.GuardianSecretHash,
             CodingSecretHash = file?.CodingSecretHash,
+            McpProxies = file?.McpProxies ?? [],
         };
     }
+}
+
+public class McpProxyEntry
+{
+    public string Prefix { get; set; } = "";
+    public string Target { get; set; } = "";
 }
 
 public class ConfigFile
@@ -81,4 +89,5 @@ public class ConfigFile
     public string? OAuthBaseUrl { get; set; }
     public string? GuardianSecretHash { get; set; }
     public string? CodingSecretHash { get; set; }
+    public List<McpProxyEntry>? McpProxies { get; set; }
 }

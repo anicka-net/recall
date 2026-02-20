@@ -186,6 +186,10 @@ if (httpMode)
     // OAuth 2.1 endpoints
     OAuthEndpoints.Map(app, diaryDb, recallConfig);
 
+    // Register MCP proxy routes (only if configured)
+    if (recallConfig.McpProxies.Count > 0)
+        McpProxy.MapProxies(app, recallConfig.McpProxies);
+
     app.MapMcp();
     app.MapGet("/health", () => "ok");
 
