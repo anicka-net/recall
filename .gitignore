@@ -21,3 +21,4 @@ appsettings.*.json
 secrets.json
 deploy/
 publish/
+publish-sc/

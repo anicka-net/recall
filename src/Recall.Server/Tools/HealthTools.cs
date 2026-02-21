@@ -18,7 +18,7 @@ public partial class HealthTools
         [Description("Max results (default 7)")] int limit = 7,
         [Description("Access secret")] string? secret = null)
     {
-        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        var (access, _) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
         if (access != AccessLevel.Guardian)
             return "Health data requires guardian access.";
 
@@ -46,7 +46,7 @@ public partial class HealthTools
         [Description("Number of days (default 7)")] int days = 7,
         [Description("Access secret")] string? secret = null)
     {
-        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        var (access, _) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
         if (access != AccessLevel.Guardian)
             return "Health data requires guardian access.";
 

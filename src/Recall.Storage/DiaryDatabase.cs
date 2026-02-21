@@ -3,7 +3,13 @@ using Microsoft.Data.Sqlite;
 
 namespace Recall.Storage;
 
-public enum AccessLevel { None, Coding, Guardian }
+public enum AccessLevel { None, Scoped, Coding, Guardian }
+
+public class ScopeEntry
+{
+    public string Name { get; set; } = "";
+    public string SecretHash { get; set; } = "";
+}
 
 public record DiaryEntry(
     int Id,
@@ -24,16 +30,23 @@ public class DiaryDatabase : IDisposable
         _embeddings = embeddings;
     }
 
-    public AccessLevel ResolveAccess(string? secret, string? guardianHash, string? codingHash)
+    public (AccessLevel Level, string? Scope) ResolveAccess(
+        string? secret, string? guardianHash, string? codingHash, IReadOnlyList<ScopeEntry>? scopes = null)
     {
         if (string.IsNullOrEmpty(secret))
-            return AccessLevel.None;
+            return (AccessLevel.None, null);
         var hash = HashKey(secret);
         if (!string.IsNullOrEmpty(guardianHash) && hash == guardianHash)
-            return AccessLevel.Guardian;
+            return (AccessLevel.Guardian, null);
         if (!string.IsNullOrEmpty(codingHash) && hash == codingHash)
-            return AccessLevel.Coding;
-        return AccessLevel.None;
+            return (AccessLevel.Coding, null);
+        if (scopes != null)
+        {
+            var scope = scopes.FirstOrDefault(s => s.SecretHash == hash);
+            if (scope != null)
+                return (AccessLevel.Scoped, scope.Name);
+        }
+        return (AccessLevel.None, null);
     }
 
     public bool IsEntryRestricted(int id)
@@ -45,8 +58,41 @@ public class DiaryDatabase : IDisposable
         return result is long v && v != 0;
     }
 
+    public string? GetEntryScope(int id)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT scope FROM entries WHERE id = @id";
+        cmd.Parameters.AddWithValue("@id", id);
+        var result = cmd.ExecuteScalar();
+        return result is string s ? s : null;
+    }
+
+    /// <summary>
+    /// Build SQL filter for access control. Returns (AND-clause, parameter-binder).
+    /// Guardian (no explicit scope): scope IS NULL (global entries, restricted + unrestricted)
+    /// Guardian (explicit scope): scope = @scope
+    /// Coding: scope IS NULL AND restricted = 0
+    /// Scoped: scope = @scope
+    /// </summary>
+    private static (string Filter, Action<SqliteCommand>? Bind) AccessFilter(
+        AccessLevel level, string? scope, string prefix = "AND")
+    {
+        return level switch
+        {
+            AccessLevel.Guardian when scope != null =>
+                ($" {prefix} scope = @scope", cmd => cmd.Parameters.AddWithValue("@scope", scope)),
+            AccessLevel.Guardian =>
+                ($" {prefix} scope IS NULL", null),
+            AccessLevel.Scoped =>
+                ($" {prefix} scope = @scope", cmd => cmd.Parameters.AddWithValue("@scope", scope!)),
+            AccessLevel.Coding =>
+                ($" {prefix} scope IS NULL AND restricted = 0", null),
+            _ => ($" {prefix} 1 = 0", null), // None — should never reach DB methods
+        };
+    }
+
     public int WriteEntry(string content, string? tags = null, string? conversationId = null,
-        string source = "claude-code", bool restricted = false)
+        string source = "claude-code", bool restricted = false, string? scope = null)
     {
         // Combine content and tags for embedding (tags add searchable context)
         var textToEmbed = string.IsNullOrEmpty(tags) ? content : $"{content}\n{tags}";
@@ -59,8 +105,8 @@ public class DiaryDatabase : IDisposable
 
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO entries (created_at, content, tags, conversation_id, source, embedding, restricted)
-            VALUES (@now, @content, @tags, @cid, @source, @emb, @restricted);
+            INSERT INTO entries (created_at, content, tags, conversation_id, source, embedding, restricted, scope)
+            VALUES (@now, @content, @tags, @cid, @source, @emb, @restricted, @scope);
             SELECT last_insert_rowid();
             """;
         cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
@@ -70,6 +116,7 @@ public class DiaryDatabase : IDisposable
         cmd.Parameters.AddWithValue("@source", source);
         cmd.Parameters.AddWithValue("@emb", (object?)embeddingBlob ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@restricted", restricted ? 1 : 0);
+        cmd.Parameters.AddWithValue("@scope", (object?)scope ?? DBNull.Value);
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
@@ -105,33 +152,34 @@ public class DiaryDatabase : IDisposable
         return cmd.ExecuteNonQuery() > 0;
     }
 
-    public List<DiaryEntry> Search(string query, int limit = 10, bool includeRestricted = false)
+    public List<DiaryEntry> Search(string query, int limit, AccessLevel level, string? scope)
     {
         if (string.IsNullOrWhiteSpace(query))
-            return GetRecent(limit, includeRestricted);
+            return GetRecent(limit, level, scope);
 
         // Vector search if embeddings are available
         if (_embeddings is { IsAvailable: true })
         {
-            try { return VectorSearch(query, limit, includeRestricted); }
+            try { return VectorSearch(query, limit, level, scope); }
             catch { /* fall through to LIKE */ }
         }
 
-        return SearchLike(query, limit, includeRestricted);
+        return SearchLike(query, limit, level, scope);
     }
 
-    private List<DiaryEntry> VectorSearch(string query, int limit, bool includeRestricted = false)
+    private List<DiaryEntry> VectorSearch(string query, int limit, AccessLevel level, string? scope)
     {
         var queryEmbedding = _embeddings!.Embed(query);
+        var (filter, bind) = AccessFilter(level, scope);
 
-        // Load all entries that have embeddings
+        // Load matching entries that have embeddings
         using var cmd = _conn.CreateCommand();
-        var restrictFilter = includeRestricted ? "" : " AND restricted = 0";
         cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id, embedding
             FROM entries
-            WHERE embedding IS NOT NULL{restrictFilter}
+            WHERE embedding IS NOT NULL{filter}
             """;
+        bind?.Invoke(cmd);
 
         var scored = new List<(DiaryEntry Entry, float Score)>();
         using var reader = cmd.ExecuteReader();
@@ -157,41 +205,45 @@ public class DiaryDatabase : IDisposable
             .ToList();
     }
 
-    public List<DiaryEntry> GetRecent(int count = 10, bool includeRestricted = false)
+    public List<DiaryEntry> GetRecent(int count, AccessLevel level, string? scope)
     {
+        var (filter, bind) = AccessFilter(level, scope, "WHERE");
         using var cmd = _conn.CreateCommand();
-        var restrictFilter = includeRestricted ? "" : "WHERE restricted = 0";
         cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id
             FROM entries
-            {restrictFilter}
+            {filter}
             ORDER BY created_at DESC
             LIMIT @count
             """;
         cmd.Parameters.AddWithValue("@count", count);
+        bind?.Invoke(cmd);
         return ReadEntries(cmd);
     }
 
-    public int GetEntryCount()
+    public int GetEntryCount(AccessLevel level, string? scope)
     {
+        var (filter, bind) = AccessFilter(level, scope, "WHERE");
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM entries";
+        cmd.CommandText = $"SELECT COUNT(*) FROM entries {filter}";
+        bind?.Invoke(cmd);
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
-    private List<DiaryEntry> SearchLike(string query, int limit, bool includeRestricted = false)
+    private List<DiaryEntry> SearchLike(string query, int limit, AccessLevel level, string? scope)
     {
+        var (filter, bind) = AccessFilter(level, scope);
         using var cmd = _conn.CreateCommand();
-        var restrictFilter = includeRestricted ? "" : "AND restricted = 0";
         cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id
             FROM entries
-            WHERE (content LIKE @pattern OR tags LIKE @pattern) {restrictFilter}
+            WHERE (content LIKE @pattern OR tags LIKE @pattern){filter}
             ORDER BY created_at DESC
             LIMIT @limit
             """;
         cmd.Parameters.AddWithValue("@pattern", $"%{query}%");
         cmd.Parameters.AddWithValue("@limit", limit);
+        bind?.Invoke(cmd);
         return ReadEntries(cmd);
     }
 

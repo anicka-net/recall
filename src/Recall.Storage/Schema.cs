@@ -158,6 +158,18 @@ public static class Schema
                 """;
             restrict.ExecuteNonQuery();
         }
+
+        if (version < 5)
+        {
+            // Scoped users: isolated diary spaces per project/user
+            using var scope = connection.CreateCommand();
+            scope.CommandText = """
+                ALTER TABLE entries ADD COLUMN scope TEXT;
+                CREATE INDEX IF NOT EXISTS idx_entries_scope ON entries(scope) WHERE scope IS NOT NULL;
+                PRAGMA user_version = 5;
+                """;
+            scope.ExecuteNonQuery();
+        }
     }
 
     public static SqliteConnection CreateConnection(string dbPath)

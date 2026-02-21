@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Recall.Storage;
 
 namespace Recall.Server;
 
@@ -14,6 +15,7 @@ public class RecallConfig
     public string? GuardianSecretHash { get; init; }
     public string? CodingSecretHash { get; init; }
     public List<McpProxyEntry> McpProxies { get; init; } = [];
+    public List<ScopeEntry> Scopes { get; init; } = [];
 
     public static RecallConfig Load()
     {
@@ -67,6 +69,7 @@ public class RecallConfig
             GuardianSecretHash = file?.GuardianSecretHash,
             CodingSecretHash = file?.CodingSecretHash,
             McpProxies = file?.McpProxies ?? [],
+            Scopes = file?.Scopes ?? [],
         };
     }
 }
@@ -76,6 +79,8 @@ public class McpProxyEntry
     public string Prefix { get; set; } = "";
     public string Target { get; set; } = "";
 }
+
+// ScopeEntry is defined in Recall.Storage (used by DiaryDatabase.ResolveAccess)
 
 public class ConfigFile
 {
@@ -90,4 +95,5 @@ public class ConfigFile
     public string? GuardianSecretHash { get; set; }
     public string? CodingSecretHash { get; set; }
     public List<McpProxyEntry>? McpProxies { get; set; }
+    public List<ScopeEntry>? Scopes { get; set; }
 }

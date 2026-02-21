@@ -26,7 +26,7 @@ public class DiaryTools
         [Description("Set false to make entry visible to all sessions (default: restricted for authenticated sessions, unrestricted for stdio)")] bool restricted = true,
         [Description("Access secret")] string? secret = null)
     {
-        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
         if (access == AccessLevel.None)
             return "Access denied. Provide a valid secret.";
 
@@ -43,8 +43,12 @@ public class DiaryTools
         if (access != AccessLevel.Guardian)
             restricted = false;
 
-        var id = db.WriteEntry(content, tags, conversationId, restricted: restricted);
-        return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}{(restricted ? " [restricted]" : "")}.";
+        // Scoped users always write to their scope
+        string? scope = access == AccessLevel.Scoped ? userScope : null;
+
+        var id = db.WriteEntry(content, tags, conversationId, restricted: restricted, scope: scope);
+        var scopeNote = scope != null ? $" [scope: {scope}]" : "";
+        return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}{(restricted ? " [restricted]" : "")}{scopeNote}.";
     }
 
     [McpServerTool(Name = "diary_update")]
@@ -57,13 +61,21 @@ public class DiaryTools
         [Description("Optional new tags (replaces existing tags)")] string? tags = null,
         [Description("Access secret")] string? secret = null)
     {
-        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
         if (access == AccessLevel.None)
             return "Access denied. Provide a valid secret.";
 
         // Coding can't edit restricted entries
         if (access == AccessLevel.Coding && db.IsEntryRestricted(id))
             return $"Entry #{id} is restricted. Guardian access required to edit.";
+
+        // Scoped users can only edit entries in their scope
+        if (access == AccessLevel.Scoped)
+        {
+            var entryScope = db.GetEntryScope(id);
+            if (entryScope != userScope)
+                return $"Entry #{id} is not in your scope.";
+        }
 
         var success = db.UpdateEntry(id, content, tags);
         if (!success)
@@ -82,12 +94,15 @@ public class DiaryTools
         [Description("Max results to return (default: from config)")] int limit = 0,
         [Description("Access secret")] string? secret = null)
     {
-        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
         if (access == AccessLevel.None)
             return "Access denied. Provide a valid secret.";
 
+        // Scoped users always filter to their scope; others see global (unscoped)
+        var scope = access == AccessLevel.Scoped ? userScope : null;
+
         var effectiveLimit = limit > 0 ? limit : config.SearchResultLimit;
-        var results = db.Search(query, effectiveLimit, includeRestricted: access == AccessLevel.Guardian);
+        var results = db.Search(query, effectiveLimit, access, scope);
         if (results.Count == 0)
             return "No entries found matching your query.";
 
@@ -102,16 +117,16 @@ public class DiaryTools
         [Description("Brief summary of what this conversation is about")] string topic,
         [Description("Access secret")] string? secret = null)
     {
-        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
         if (access == AccessLevel.None)
             return "Access denied. Provide a valid secret.";
 
         var conversationId = Guid.NewGuid().ToString("N")[..12];
         var limit = config.AutoContextLimit;
-        var includeRestricted = access == AccessLevel.Guardian;
+        var scope = access == AccessLevel.Scoped ? userScope : null;
 
-        var recent = db.GetRecent(3, includeRestricted);
-        var relevant = db.Search(topic, limit, includeRestricted);
+        var recent = db.GetRecent(3, access, scope);
+        var relevant = db.Search(topic, limit, access, scope);
 
         // Merge and deduplicate
         var seen = new HashSet<int>();
@@ -127,7 +142,7 @@ public class DiaryTools
             .Take(limit + 3) // recent + relevant
             .ToList();
 
-        var totalEntries = db.GetEntryCount();
+        var totalEntries = db.GetEntryCount(access, scope);
 
         if (sorted.Count == 0)
             return $"No diary entries yet. This is a fresh start.\nConversation ID: {conversationId}\nCurrent time: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz} ({DateTimeOffset.Now:dddd})";
@@ -146,11 +161,12 @@ public class DiaryTools
         [Description("Number of entries to return (default: 10)")] int count = 10,
         [Description("Access secret")] string? secret = null)
     {
-        var access = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash);
+        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
         if (access == AccessLevel.None)
             return "Access denied. Provide a valid secret.";
 
-        var entries = db.GetRecent(count, includeRestricted: access == AccessLevel.Guardian);
+        var scope = access == AccessLevel.Scoped ? userScope : null;
+        var entries = db.GetRecent(count, access, scope);
         if (entries.Count == 0)
             return "No diary entries yet.";
 
