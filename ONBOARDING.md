@@ -35,22 +35,27 @@ if [ -z "$SECRET" ]; then
   echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"No Recall secret found. Run: echo -n YOUR_SECRET > ~/.recall-secret"}}' >&1
   exit 0
 fi
-cat <<EOF
-{
+
+# Read the original tool input from stdin and merge secret into it
+INPUT=$(cat)
+ORIGINAL_INPUT=$(echo "$INPUT" | jq -r '.tool_input // {}')
+MERGED=$(echo "$ORIGINAL_INPUT" | jq --arg s "$SECRET" '. + {secret: $s}')
+
+jq -n --argjson merged "$MERGED" '{
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "allow",
     "permissionDecisionReason": "Recall scope secret injected",
-    "updatedInput": {
-      "secret": "$SECRET"
-    }
+    "updatedInput": $merged
   }
-}
-EOF
+}'
 exit 0
 HOOK
 chmod +x ~/.claude/hooks/recall-scope.sh
 ```
+
+**Note:** This script requires `jq`. Install it if not available:
+`sudo apt install jq` (Debian/Ubuntu) or `brew install jq` (macOS).
 
 ### 3. Configure the hook in Claude Code settings
 
