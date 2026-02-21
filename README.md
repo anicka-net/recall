@@ -158,6 +158,47 @@ Register it in `~/.claude/settings.json`:
 
 For claude.ai (guardian), include the guardian secret in the system prompt with instructions to pass it as the `secret` parameter on every tool call.
 
+### Scoped users (isolated projects)
+
+Multiple users or projects can share a single Recall instance with full isolation. Each scoped user gets their own diary space — they can only see and write entries tagged with their scope. The admin (guardian) sees global entries by default and can opt into viewing any scope.
+
+| Level | Sees | Writes | Health |
+|-------|------|--------|--------|
+| **Guardian** | global entries (all scopes on request) | any scope | yes |
+| **Coding** | global unrestricted only | global unrestricted | no |
+| **Scoped** | only their scope | only their scope | no |
+
+**Setting up a scope:**
+
+```bash
+# Generate credentials
+PASSPHRASE=$(openssl rand -base64 24)
+HASH=$(echo -n "$PASSPHRASE" | sha256sum | cut -d' ' -f1)
+echo "Passphrase: $PASSPHRASE"
+echo "Hash: $HASH"
+```
+
+Add to `~/.recall/config.json` on the server:
+
+```json
+{
+  "Scopes": [
+    { "Name": "project-name", "SecretHash": "<hash from above>" }
+  ]
+}
+```
+
+Restart the service. Give the passphrase to the user — see [ONBOARDING.md](ONBOARDING.md) for their setup steps.
+
+**How scoped isolation works:**
+
+- Entries have a `scope` column (NULL = global, "project-name" = scoped)
+- Scoped users' writes are auto-tagged with their scope
+- Queries filter by scope at the SQL level — ONNX vector search only scans matching entries, not the entire database
+- Existing entries (scope = NULL) remain visible to Guardian and Coding, invisible to scoped users
+
+**Important: PreToolUse hook `updatedInput` replaces, not merges.** The hook script must read the original `tool_input` from stdin, merge the secret into it with `jq`, and return the full combined object. If you only return `{secret: "..."}`, all other parameters (like `content`) are lost and the tool call fails. See [ONBOARDING.md](ONBOARDING.md) for the correct hook script.
+
 ## Health data integration
 
 Recall can store daily health summaries from Fitbit (sleep, heart rate, activity, SpO2) and menstrual cycle tracking. The `tools/` directory contains:
