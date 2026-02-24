@@ -13,11 +13,20 @@ REMOTE_DB=".recall/recall.db"
 
 echo "--- $(date -Iseconds) ---"
 
-# 1. Fetch from Fitbit API, write to local DB
+# 1. Pull cycle_starts from remote (entries logged via claude.ai)
+#    Must happen before fitbit sync so summaries have correct cycle data.
+ssh "$REMOTE" "sqlite3 ~/$REMOTE_DB \"
+    SELECT 'INSERT OR REPLACE INTO cycle_starts (date, notes, created_at) VALUES ('
+        || quote(date) || ',' || quote(notes) || ',' || quote(created_at) || ');'
+    FROM cycle_starts;
+\"" | sqlite3 "$LOCAL_DB"
+echo "Pulled cycle_starts from remote."
+
+# 2. Fetch from Fitbit API, write to local DB
 "$VENV" "$SYNC" sync --days 2
 echo "Local sync done."
 
-# 2. Push health_data rows to remote (INSERT OR REPLACE = idempotent)
+# 3. Push health_data rows to remote (INSERT OR REPLACE = idempotent)
 sqlite3 "$LOCAL_DB" "
     SELECT 'INSERT OR REPLACE INTO health_data (date, summary, sleep_json, heart_json, activity_json, spo2_json, embedding, synced_at) VALUES ('
         || quote(date) || ',' || quote(summary) || ',' || quote(sleep_json) || ','
@@ -28,7 +37,7 @@ sqlite3 "$LOCAL_DB" "
 
 echo "Pushed health_data to remote."
 
-# 3. Push cycle_starts to remote (if table exists locally)
+# 4. Push cycle_starts to remote (entries logged locally)
 if sqlite3 "$LOCAL_DB" "SELECT 1 FROM cycle_starts LIMIT 1" 2>/dev/null; then
     {
         echo "CREATE TABLE IF NOT EXISTS cycle_starts (date TEXT PRIMARY KEY, notes TEXT, created_at TEXT NOT NULL);"
