@@ -394,6 +394,19 @@ def build_summary(
     if sleep:
         lines.append("")
         lines.append("Sleep:")
+        # Bedtime and wake time
+        if sleep.get("start_time"):
+            try:
+                bt = datetime.fromisoformat(sleep["start_time"])
+                lines.append(f"- Bedtime: {bt.strftime('%H:%M')}")
+            except (ValueError, TypeError):
+                pass
+        if sleep.get("end_time"):
+            try:
+                wt = datetime.fromisoformat(sleep["end_time"])
+                lines.append(f"- Wake time: {wt.strftime('%H:%M')}")
+            except (ValueError, TypeError):
+                pass
         total_min = sleep["duration_ms"] // 60000
         stages = sleep.get("stages")
         if stages:

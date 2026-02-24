@@ -8,7 +8,7 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 VENV="$SCRIPT_DIR/venv/bin/python3"
 SYNC="$SCRIPT_DIR/fitbit-sync.py"
 LOCAL_DB="$HOME/.recall/recall.db"
-REMOTE="twilight.ucw.cz"
+REMOTE="${RECALL_REMOTE_HOST:?Set RECALL_REMOTE_HOST}"
 REMOTE_DB=".recall/recall.db"
 
 echo "--- $(date -Iseconds) ---"
