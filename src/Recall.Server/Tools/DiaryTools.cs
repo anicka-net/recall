@@ -84,6 +84,37 @@ public class DiaryTools
         return $"Entry #{id} updated at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}.";
     }
 
+    [McpServerTool(Name = "diary_get")]
+    [Description("Get a specific diary entry by its ID number.")]
+    public static string GetEntry(
+        DiaryDatabase db,
+        RecallConfig config,
+        [Description("The entry ID number")] int id,
+        [Description("Access secret")] string? secret = null)
+    {
+        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
+        var entry = db.GetEntry(id);
+        if (entry == null)
+            return $"Entry #{id} not found.";
+
+        // Access control: check scope and restricted
+        if (access == AccessLevel.Scoped)
+        {
+            var entryScope = db.GetEntryScope(id);
+            if (entryScope != userScope)
+                return $"Entry #{id} is not in your scope.";
+        }
+        else if (access == AccessLevel.Coding && db.IsEntryRestricted(id))
+        {
+            return $"Entry #{id} is restricted. Guardian access required.";
+        }
+
+        return FormatEntries([entry]);
+    }
+
     [McpServerTool(Name = "diary_query")]
     [Description("Search past diary entries using natural language. Use keywords or phrases to find specific topics, events, or decisions.")]
 

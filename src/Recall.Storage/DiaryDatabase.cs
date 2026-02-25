@@ -58,6 +58,21 @@ public class DiaryDatabase : IDisposable
         return result is long v && v != 0;
     }
 
+    public DiaryEntry? GetEntry(int id)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT id, content, tags, created_at, conversation_id FROM entries WHERE id = @id";
+        cmd.Parameters.AddWithValue("@id", id);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return new DiaryEntry(
+            reader.GetInt32(0),
+            DateTimeOffset.Parse(reader.GetString(3)),
+            reader.GetString(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            reader.IsDBNull(4) ? null : reader.GetString(4));
+    }
+
     public string? GetEntryScope(int id)
     {
         using var cmd = _conn.CreateCommand();
