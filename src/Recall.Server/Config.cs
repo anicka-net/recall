@@ -16,6 +16,8 @@ public class RecallConfig
     public string? CodingSecretHash { get; init; }
     public List<McpProxyEntry> McpProxies { get; init; } = [];
     public List<ScopeEntry> Scopes { get; init; } = [];
+    public int TierHotDays { get; init; } = 7;
+    public int TierWarmDays { get; init; } = 90;
 
     public static RecallConfig Load()
     {
@@ -70,6 +72,8 @@ public class RecallConfig
             CodingSecretHash = file?.CodingSecretHash,
             McpProxies = file?.McpProxies ?? [],
             Scopes = file?.Scopes ?? [],
+            TierHotDays = file?.TierHotDays ?? 7,
+            TierWarmDays = file?.TierWarmDays ?? 90,
         };
     }
 }
@@ -96,4 +100,6 @@ public class ConfigFile
     public string? CodingSecretHash { get; set; }
     public List<McpProxyEntry>? McpProxies { get; set; }
     public List<ScopeEntry>? Scopes { get; set; }
+    public int? TierHotDays { get; set; }
+    public int? TierWarmDays { get; set; }
 }

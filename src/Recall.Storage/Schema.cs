@@ -170,6 +170,20 @@ public static class Schema
                 """;
             scope.ExecuteNonQuery();
         }
+
+        if (version < 6)
+        {
+            // Tiered aging: tier, pinned, foundational columns
+            using var v6 = connection.CreateCommand();
+            v6.CommandText = """
+                ALTER TABLE entries ADD COLUMN tier INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE entries ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE entries ADD COLUMN foundational INTEGER NOT NULL DEFAULT 0;
+                CREATE INDEX IF NOT EXISTS idx_entries_tier ON entries(tier);
+                PRAGMA user_version = 6;
+                """;
+            v6.ExecuteNonQuery();
+        }
     }
 
     public static SqliteConnection CreateConnection(string dbPath)

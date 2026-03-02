@@ -167,33 +167,35 @@ public class DiaryDatabase : IDisposable
         return cmd.ExecuteNonQuery() > 0;
     }
 
-    public List<DiaryEntry> Search(string query, int limit, AccessLevel level, string? scope)
+    public List<DiaryEntry> Search(string query, int limit, AccessLevel level, string? scope,
+        int maxTier = 2)
     {
         if (string.IsNullOrWhiteSpace(query))
-            return GetRecent(limit, level, scope);
+            return GetRecent(limit, level, scope, maxTier);
 
         // Vector search if embeddings are available
         if (_embeddings is { IsAvailable: true })
         {
-            try { return VectorSearch(query, limit, level, scope); }
+            try { return VectorSearch(query, limit, level, scope, maxTier); }
             catch { /* fall through to LIKE */ }
         }
 
-        return SearchLike(query, limit, level, scope);
+        return SearchLike(query, limit, level, scope, maxTier);
     }
 
-    private List<DiaryEntry> VectorSearch(string query, int limit, AccessLevel level, string? scope)
+    private List<DiaryEntry> VectorSearch(string query, int limit, AccessLevel level,
+        string? scope, int maxTier = 2)
     {
         var queryEmbedding = _embeddings!.Embed(query);
         var (filter, bind) = AccessFilter(level, scope);
 
-        // Load matching entries that have embeddings
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id, embedding
             FROM entries
-            WHERE embedding IS NOT NULL{filter}
+            WHERE embedding IS NOT NULL AND tier <= @maxTier{filter}
             """;
+        cmd.Parameters.AddWithValue("@maxTier", maxTier);
         bind?.Invoke(cmd);
 
         var scored = new List<(DiaryEntry Entry, float Score)>();
@@ -220,17 +222,19 @@ public class DiaryDatabase : IDisposable
             .ToList();
     }
 
-    public List<DiaryEntry> GetRecent(int count, AccessLevel level, string? scope)
+    public List<DiaryEntry> GetRecent(int count, AccessLevel level, string? scope,
+        int maxTier = 0)
     {
-        var (filter, bind) = AccessFilter(level, scope, "WHERE");
+        var (filter, bind) = AccessFilter(level, scope);
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id
             FROM entries
-            {filter}
+            WHERE tier <= @maxTier{filter}
             ORDER BY created_at DESC
             LIMIT @count
             """;
+        cmd.Parameters.AddWithValue("@maxTier", maxTier);
         cmd.Parameters.AddWithValue("@count", count);
         bind?.Invoke(cmd);
         return ReadEntries(cmd);
@@ -245,19 +249,21 @@ public class DiaryDatabase : IDisposable
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
-    private List<DiaryEntry> SearchLike(string query, int limit, AccessLevel level, string? scope)
+    private List<DiaryEntry> SearchLike(string query, int limit, AccessLevel level,
+        string? scope, int maxTier = 2)
     {
         var (filter, bind) = AccessFilter(level, scope);
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id
             FROM entries
-            WHERE (content LIKE @pattern OR tags LIKE @pattern){filter}
+            WHERE (content LIKE @pattern OR tags LIKE @pattern) AND tier <= @maxTier{filter}
             ORDER BY created_at DESC
             LIMIT @limit
             """;
         cmd.Parameters.AddWithValue("@pattern", $"%{query}%");
         cmd.Parameters.AddWithValue("@limit", limit);
+        cmd.Parameters.AddWithValue("@maxTier", maxTier);
         bind?.Invoke(cmd);
         return ReadEntries(cmd);
     }
@@ -276,6 +282,73 @@ public class DiaryDatabase : IDisposable
                 ConversationId: reader.IsDBNull(4) ? null : reader.GetString(4)));
         }
         return entries;
+    }
+
+    // ── Tiered Aging ────────────────────────────────────────────
+
+    public void RunAging(int hotDays, int warmDays)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE entries SET tier = 1 WHERE tier = 0 AND pinned = 0 AND foundational = 0
+              AND created_at < datetime('now', '-' || @hotDays || ' days');
+            UPDATE entries SET tier = 2 WHERE tier = 1 AND pinned = 0 AND foundational = 0
+              AND created_at < datetime('now', '-' || @warmDays || ' days');
+            """;
+        cmd.Parameters.AddWithValue("@hotDays", hotDays);
+        cmd.Parameters.AddWithValue("@warmDays", warmDays);
+        cmd.ExecuteNonQuery();
+    }
+
+    public List<DiaryEntry> GetFoundational()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, created_at, content, tags, conversation_id
+            FROM entries WHERE foundational = 1 ORDER BY id
+            """;
+        return ReadEntries(cmd);
+    }
+
+    public bool SetPin(int id, bool pinned, bool foundational)
+    {
+        using var cmd = _conn.CreateCommand();
+        // Foundational implies pinned
+        var pin = foundational || pinned;
+        cmd.CommandText = """
+            UPDATE entries SET pinned = @pinned, foundational = @foundational
+            WHERE id = @id
+            """;
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.AddWithValue("@pinned", pin ? 1 : 0);
+        cmd.Parameters.AddWithValue("@foundational", foundational ? 1 : 0);
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
+    public (int Hot, int Warm, int Cold) GetTierCounts(AccessLevel level, string? scope)
+    {
+        var (filter, bind) = AccessFilter(level, scope);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT tier, COUNT(*) FROM entries
+            WHERE 1=1{filter}
+            GROUP BY tier
+            """;
+        bind?.Invoke(cmd);
+        int hot = 0, warm = 0, cold = 0;
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var tier = reader.GetInt32(0);
+            var count = reader.GetInt32(1);
+            switch (tier)
+            {
+                case 0: hot = count; break;
+                case 1: warm = count; break;
+                default: cold += count; break;
+            }
+        }
+        return (hot, warm, cold);
     }
 
     // ── Health Data ──────────────────────────────────────────────

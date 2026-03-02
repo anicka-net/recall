@@ -117,7 +117,6 @@ public class DiaryTools
 
     [McpServerTool(Name = "diary_query")]
     [Description("Search past diary entries using natural language. Use keywords or phrases to find specific topics, events, or decisions.")]
-
     public static string Query(
         DiaryDatabase db,
         RecallConfig config,
@@ -129,11 +128,10 @@ public class DiaryTools
         if (access == AccessLevel.None)
             return "Access denied. Provide a valid secret.";
 
-        // Scoped users always filter to their scope; others see global (unscoped)
         var scope = access == AccessLevel.Scoped ? userScope : null;
 
         var effectiveLimit = limit > 0 ? limit : config.SearchResultLimit;
-        var results = db.Search(query, effectiveLimit, access, scope);
+        var results = db.Search(query, effectiveLimit, access, scope, maxTier: 2);
         if (results.Count == 0)
             return "No entries found matching your query.";
 
@@ -156,10 +154,25 @@ public class DiaryTools
         var limit = config.AutoContextLimit;
         var scope = access == AccessLevel.Scoped ? userScope : null;
 
-        var recent = db.GetRecent(3, access, scope);
-        var relevant = db.Search(topic, limit, access, scope);
+        // 1. Run aging
+        db.RunAging(config.TierHotDays, config.TierWarmDays);
 
-        // Merge and deduplicate
+        // 2. Foundational entries (Guardian only)
+        string foundationalSection = "";
+        if (access == AccessLevel.Guardian)
+        {
+            var found = db.GetFoundational();
+            if (found.Count > 0)
+                foundationalSection = FormatFoundationalIndex(found) + "\n";
+        }
+
+        // 3. Recent (tier 0 only)
+        var recent = db.GetRecent(3, access, scope, maxTier: 0);
+
+        // 4. Semantic search (tier 0 + 1 = hot + warm)
+        var relevant = db.Search(topic, limit, access, scope, maxTier: 1);
+
+        // 5. Merge and deduplicate
         var seen = new HashSet<int>();
         var merged = new List<DiaryEntry>();
         foreach (var e in recent.Concat(relevant))
@@ -170,18 +183,19 @@ public class DiaryTools
 
         var sorted = merged
             .OrderByDescending(e => e.CreatedAt)
-            .Take(limit + 3) // recent + relevant
+            .Take(limit + 3)
             .ToList();
 
-        var totalEntries = db.GetEntryCount(access, scope);
+        // 6. Tier counts
+        var (hot, warm, cold) = db.GetTierCounts(access, scope);
 
-        if (sorted.Count == 0)
+        if (sorted.Count == 0 && string.IsNullOrEmpty(foundationalSection))
             return $"No diary entries yet. This is a fresh start.\nConversation ID: {conversationId}\nCurrent time: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz} ({DateTimeOffset.Now:dddd})";
 
         var header = $"Current time: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz} ({DateTimeOffset.Now:dddd})\n" +
-                     $"Diary has {totalEntries} entries total. Showing {sorted.Count} relevant:\n" +
+                     $"Diary: {hot} hot / {warm} warm / {cold} cold entries. Showing {sorted.Count} relevant:\n" +
                      $"Conversation ID: {conversationId}\n\n";
-        return header + FormatEntries(sorted);
+        return header + foundationalSection + FormatEntries(sorted);
     }
 
     [McpServerTool(Name = "diary_list_recent")]
@@ -197,11 +211,55 @@ public class DiaryTools
             return "Access denied. Provide a valid secret.";
 
         var scope = access == AccessLevel.Scoped ? userScope : null;
-        var entries = db.GetRecent(count, access, scope);
+        var entries = db.GetRecent(count, access, scope, maxTier: 0);
         if (entries.Count == 0)
             return "No diary entries yet.";
 
         return FormatEntries(entries);
+    }
+
+    [McpServerTool(Name = "diary_pin")]
+    [Description("Pin or unpin a diary entry. Pinned entries don't auto-age between tiers. Foundational entries are always loaded in context summary.")]
+    public static string Pin(
+        DiaryDatabase db,
+        RecallConfig config,
+        [Description("The entry ID to pin/unpin")] int id,
+        [Description("Access secret")] string? secret = null,
+        [Description("Pin the entry (prevents aging)")] bool pin = true,
+        [Description("Mark as foundational (always in context)")] bool foundational = false)
+    {
+        var (access, _) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
+        if (access != AccessLevel.Guardian)
+            return "Only guardian can pin entries.";
+
+        var success = db.SetPin(id, pin, foundational);
+        if (!success) return $"Entry #{id} not found.";
+
+        var status = foundational ? "foundational + pinned"
+            : pin ? "pinned" : "unpinned";
+        return $"Entry #{id} marked as {status}.";
+    }
+
+    private static string FormatFoundationalIndex(List<DiaryEntry> entries)
+    {
+        var lines = new List<string> { "Foundation:" };
+        foreach (var e in entries)
+        {
+            var tagStr = string.IsNullOrEmpty(e.Tags) ? "" : $" [{e.Tags}]";
+            var contentLines = e.Content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var summary = "";
+            foreach (var line in contentLines)
+            {
+                if (!line.StartsWith("**Date:") && !line.StartsWith("Date:"))
+                {
+                    summary = line.Length > 120 ? line[..120] + "..." : line;
+                    break;
+                }
+            }
+            lines.Add($"  #{e.Id}{tagStr} {summary}");
+        }
+        lines.Add("  (Use diary_get to read full content)");
+        return string.Join("\n", lines);
     }
 
     private static string FormatEntries(List<DiaryEntry> entries)
