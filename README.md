@@ -15,8 +15,10 @@ Recall is an [MCP server](https://modelcontextprotocol.io/) that stores diary en
 | `diary_context` | Auto-fetch relevant past entries at conversation start |
 | `diary_write` | Record an entry with optional tags |
 | `diary_query` | Search past entries by meaning (semantic search) |
+| `diary_get` | Fetch a specific entry by ID |
 | `diary_update` | Edit an existing entry |
 | `diary_list_recent` | List recent entries chronologically |
+| `diary_pin` | Pin/unpin entries or mark as foundational (guardian only) |
 | `diary_time` | Current date/time (so the AI knows when it is) |
 | `health_query` | Search health/fitness data (sleep, HR, steps, SpO2) |
 | `health_recent` | Recent health summaries |
@@ -98,15 +100,16 @@ dotnet run -- key revoke 3              # Revoke by ID
 
 Both methods work simultaneously. Without any configured, the server runs open.
 
-### Tool-level: three-tier access
+### Tool-level: four-tier access
 
-Every tool call (except `diary_time`) requires a `secret` parameter. The server hashes it and compares against two configured hashes to determine the access level:
+Every tool call (except `diary_time`) requires a `secret` parameter. The server hashes it and compares against configured hashes to determine the access level:
 
-| Level | Diary | Health | Write restricted |
-|-------|-------|--------|------------------|
-| **Guardian** | all entries | yes | yes |
-| **Coding** | unrestricted only | no | no |
-| **None** (no/bad secret) | rejected | rejected | rejected |
+| Level | Diary | Health | Pin/foundational | Write restricted |
+|-------|-------|--------|------------------|------------------|
+| **Guardian** | all unscoped entries, all tiers | yes | yes | yes |
+| **Coding** | unrestricted + unscoped only | no | no | no |
+| **Scoped** | own scope only | no | no | no |
+| **None** (no/bad secret) | rejected | rejected | rejected | rejected |
 
 Configure in `~/.recall/config.json`:
 
@@ -198,6 +201,33 @@ Restart the service. Give the passphrase to the user — see [ONBOARDING.md](ONB
 - Existing entries (scope = NULL) remain visible to Guardian and Coding, invisible to scoped users
 
 **Important: PreToolUse hook `updatedInput` replaces, not merges.** The hook script must read the original `tool_input` from stdin, merge the secret into it with `jq`, and return the full combined object. If you only return `{secret: "..."}`, all other parameters (like `content`) are lost and the tool call fails. See [ONBOARDING.md](ONBOARDING.md) for the correct hook script.
+
+## Tiered aging
+
+As entries accumulate, older ones are automatically deprioritized so recent context stays relevant. Entries move through three tiers:
+
+| Tier | Name | Age | `diary_context` | `diary_query` | `diary_list_recent` |
+|------|------|-----|-----------------|---------------|---------------------|
+| 0 | hot | < 7 days | recent + search | yes | yes |
+| 1 | warm | 7–90 days | search only | yes | no |
+| 2 | cold | > 90 days | no | yes | no |
+
+Aging runs lazily at the start of each `diary_context` call. Thresholds are configurable:
+
+```json
+{
+  "tierHotDays": 7,
+  "tierWarmDays": 90
+}
+```
+
+### Pinning and foundational entries
+
+**Pinned** entries (`diary_pin id=42`) are exempt from auto-aging — they stay at their current tier forever.
+
+**Foundational** entries (`diary_pin id=42 foundational=true`) are pinned and additionally always shown at the top of `diary_context` for guardian users. They appear as a compact index (ID + first line), with `diary_get` available for full content. Useful for reference material that should always be in context.
+
+Both features are guardian-only.
 
 ## Health data integration
 
