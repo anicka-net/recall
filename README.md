@@ -18,7 +18,7 @@ Recall is an [MCP server](https://modelcontextprotocol.io/) that stores diary en
 | `diary_get` | Fetch a specific entry by ID |
 | `diary_update` | Edit an existing entry |
 | `diary_list_recent` | List recent entries chronologically |
-| `diary_pin` | Pin/unpin entries or mark as foundational (guardian only) |
+| `diary_pin` | Pin/unpin entries or mark as foundational (privileged only) |
 | `diary_time` | Current date/time (so the AI knows when it is) |
 | `health_query` | Search health/fitness data (sleep, HR, steps, SpO2) |
 | `health_recent` | Recent health summaries |
@@ -106,7 +106,7 @@ Every tool call (except `diary_time`) requires a `secret` parameter. The server 
 
 | Level | Diary | Health | Pin/foundational | Write restricted |
 |-------|-------|--------|------------------|------------------|
-| **Guardian** | all unscoped entries, all tiers | yes | yes | yes |
+| **Privileged** | all unscoped entries, all tiers | yes | yes | yes |
 | **Coding** | unrestricted + unscoped only | no | no | no |
 | **Scoped** | own scope only | no | no | no |
 | **None** (no/bad secret) | rejected | rejected | rejected | rejected |
@@ -115,7 +115,7 @@ Configure in `~/.recall/config.json`:
 
 ```json
 {
-  "guardianSecretHash": "<sha256 of guardian passphrase>",
+  "guardianSecretHash": "<sha256 of privileged passphrase>",
   "codingSecretHash": "<sha256 of coding passphrase>"
 }
 ```
@@ -159,15 +159,15 @@ Register it in `~/.claude/settings.json`:
 }
 ```
 
-For claude.ai (guardian), include the guardian secret in the system prompt with instructions to pass it as the `secret` parameter on every tool call.
+For claude.ai (privileged), include the privileged secret in the system prompt with instructions to pass it as the `secret` parameter on every tool call.
 
 ### Scoped users (isolated projects)
 
-Multiple users or projects can share a single Recall instance with full isolation. Each scoped user gets their own diary space — they can only see and write entries tagged with their scope. The admin (guardian) sees global entries by default and can opt into viewing any scope.
+Multiple users or projects can share a single Recall instance with full isolation. Each scoped user gets their own diary space — they can only see and write entries tagged with their scope. The admin (privileged user) sees global entries by default and can opt into viewing any scope.
 
 | Level | Sees | Writes | Health |
 |-------|------|--------|--------|
-| **Guardian** | global entries (all scopes on request) | any scope | yes |
+| **Privileged** | global entries (all scopes on request) | any scope | yes |
 | **Coding** | global unrestricted only | global unrestricted | no |
 | **Scoped** | only their scope | only their scope | no |
 
@@ -198,7 +198,7 @@ Restart the service. Give the passphrase to the user — see [ONBOARDING.md](ONB
 - Entries have a `scope` column (NULL = global, "project-name" = scoped)
 - Scoped users' writes are auto-tagged with their scope
 - Queries filter by scope at the SQL level — ONNX vector search only scans matching entries, not the entire database
-- Existing entries (scope = NULL) remain visible to Guardian and Coding, invisible to scoped users
+- Existing entries (scope = NULL) remain visible to Privileged and Coding, invisible to scoped users
 
 **Important: PreToolUse hook `updatedInput` replaces, not merges.** The hook script must read the original `tool_input` from stdin, merge the secret into it with `jq`, and return the full combined object. If you only return `{secret: "..."}`, all other parameters (like `content`) are lost and the tool call fails. See [ONBOARDING.md](ONBOARDING.md) for the correct hook script.
 
@@ -225,9 +225,9 @@ Aging runs lazily at the start of each `diary_context` call. Thresholds are conf
 
 **Pinned** entries (`diary_pin id=42`) are exempt from auto-aging — they stay at their current tier forever.
 
-**Foundational** entries (`diary_pin id=42 foundational=true`) are pinned and additionally always shown at the top of `diary_context` for guardian users. They appear as a compact index (ID + first line), with `diary_get` available for full content. Useful for reference material that should always be in context.
+**Foundational** entries (`diary_pin id=42 foundational=true`) are pinned and additionally always shown at the top of `diary_context` for privileged users. They appear as a compact index (ID + first line), with `diary_get` available for full content. Useful for reference material that should always be in context.
 
-Both features are guardian-only.
+Both features are privileged-only.
 
 ## Health data integration
 
