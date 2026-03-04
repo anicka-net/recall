@@ -173,14 +173,60 @@ public class DiaryDatabase : IDisposable
         if (string.IsNullOrWhiteSpace(query))
             return GetRecent(limit, level, scope, maxTier);
 
+        // Tag matches get priority — exact metadata hits should always surface
+        var tagMatches = SearchTags(query, limit, level, scope, maxTier);
+
         // Vector search if embeddings are available
+        List<DiaryEntry>? vectorMatches = null;
         if (_embeddings is { IsAvailable: true })
         {
-            try { return VectorSearch(query, limit, level, scope, maxTier); }
+            try { vectorMatches = VectorSearch(query, limit, level, scope, maxTier); }
             catch { /* fall through to LIKE */ }
         }
 
-        return SearchLike(query, limit, level, scope, maxTier);
+        vectorMatches ??= SearchLike(query, limit, level, scope, maxTier);
+
+        // Merge: tag matches first, then vector results (deduplicated)
+        if (tagMatches.Count == 0)
+            return vectorMatches;
+
+        var seen = new HashSet<int>(tagMatches.Select(e => e.Id));
+        var merged = new List<DiaryEntry>(tagMatches);
+        foreach (var entry in vectorMatches)
+        {
+            if (seen.Add(entry.Id))
+                merged.Add(entry);
+        }
+        return merged.Take(limit).ToList();
+    }
+
+    private List<DiaryEntry> SearchTags(string query, int limit, AccessLevel level,
+        string? scope, int maxTier = 2)
+    {
+        // Split query into words and match each against tags
+        var words = query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (words.Length == 0) return [];
+
+        var (filter, bind) = AccessFilter(level, scope);
+
+        // Match entries where tags contain ANY of the query words
+        var tagClauses = words.Select((_, i) => $"tags LIKE @tag{i}").ToList();
+        var tagFilter = string.Join(" OR ", tagClauses);
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT id, created_at, content, tags, conversation_id
+            FROM entries
+            WHERE ({tagFilter}) AND tier <= @maxTier{filter}
+            ORDER BY created_at DESC
+            LIMIT @limit
+            """;
+        for (int i = 0; i < words.Length; i++)
+            cmd.Parameters.AddWithValue($"@tag{i}", $"%{words[i]}%");
+        cmd.Parameters.AddWithValue("@maxTier", maxTier);
+        cmd.Parameters.AddWithValue("@limit", limit);
+        bind?.Invoke(cmd);
+        return ReadEntries(cmd);
     }
 
     private List<DiaryEntry> VectorSearch(string query, int limit, AccessLevel level,
