@@ -252,6 +252,14 @@ def fetch_sleep(config: dict, date: str) -> dict | None:
             "wake": stages.get("wake", {}).get("minutes", 0),
         }
 
+    # Sleep stage timeline (the graph data — when each stage started and how long)
+    levels_data = main.get("levels", {}).get("data", [])
+    if levels_data:
+        result["timeline"] = [
+            {"time": e["dateTime"], "level": e["level"], "seconds": e["seconds"]}
+            for e in levels_data
+        ]
+
     # Sleep score from summary if available
     summary = data.get("summary", {})
     if "totalSleepScore" in summary:
@@ -424,6 +432,35 @@ def build_summary(
             lines.append(f"- Light sleep: {format_duration(stages['light'])}")
             lines.append(f"- REM: {format_duration(stages['rem'])}")
             lines.append(f"- Awake: {format_duration(stages['wake'])}")
+        # Sleep stage timeline — show wake episodes and stage flow
+        timeline = sleep.get("timeline")
+        if timeline:
+            # Wake episodes (> 1 min) — this is what Guardian cares about most
+            wakes = []
+            for e in timeline:
+                if e["level"] == "wake" and e["seconds"] >= 120:
+                    try:
+                        t = datetime.fromisoformat(e["time"])
+                        wakes.append(f"{t.strftime('%H:%M')} ({e['seconds'] // 60}min)")
+                    except (ValueError, TypeError):
+                        pass
+            if wakes:
+                lines.append(f"- Wake episodes: {', '.join(wakes)}")
+            # Compact stage flow — skip stages shorter than 2 minutes (sensor noise)
+            stage_abbr = {"deep": "deep", "light": "light", "rem": "REM", "wake": "wake", "restless": "restless", "awake": "wake", "asleep": "asleep"}
+            flow_parts = []
+            for e in timeline:
+                if e["seconds"] < 120:
+                    continue
+                try:
+                    t = datetime.fromisoformat(e["time"])
+                    label = stage_abbr.get(e["level"], e["level"])
+                    dur = e["seconds"] // 60
+                    flow_parts.append(f"{t.strftime('%H:%M')} {label}({dur}m)")
+                except (ValueError, TypeError):
+                    pass
+            if flow_parts:
+                lines.append(f"- Stage flow: {' → '.join(flow_parts)}")
         score = sleep.get("score") or sleep.get("efficiency")
         lines.append(f"- Assessment: {assess_sleep(score)}")
 
