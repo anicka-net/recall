@@ -184,6 +184,28 @@ public static class Schema
                 """;
             v6.ExecuteNonQuery();
         }
+
+        if (version < 7)
+        {
+            // Calendar: per-day summaries and plans
+            using var v7 = connection.CreateCommand();
+            v7.CommandText = """
+                CREATE TABLE IF NOT EXISTS calendar (
+                    date TEXT NOT NULL,
+                    scope TEXT,
+                    restricted INTEGER NOT NULL DEFAULT 0,
+                    summary TEXT,
+                    plans TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_date_scope
+                    ON calendar(date, COALESCE(scope, ''), restricted);
+                CREATE INDEX IF NOT EXISTS idx_calendar_date ON calendar(date);
+                PRAGMA user_version = 7;
+                """;
+            v7.ExecuteNonQuery();
+        }
     }
 
     public static SqliteConnection CreateConnection(string dbPath)

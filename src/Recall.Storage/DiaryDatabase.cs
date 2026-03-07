@@ -397,6 +397,134 @@ public class DiaryDatabase : IDisposable
         return (hot, warm, cold);
     }
 
+    // ── Calendar ────────────────────────────────────────────────
+
+    public List<CalendarEntry> GetCalendarDay(string date, AccessLevel level, string? scope)
+    {
+        var (filter, bind) = CalendarAccessFilter(level, scope);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT date, scope, restricted, summary, plans
+            FROM calendar WHERE date = @date{filter}
+            """;
+        cmd.Parameters.AddWithValue("@date", date);
+        bind?.Invoke(cmd);
+        return ReadCalendarEntries(cmd);
+    }
+
+    public List<CalendarEntry> GetCalendarRange(string from, string to, AccessLevel level, string? scope)
+    {
+        var (filter, bind) = CalendarAccessFilter(level, scope);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT date, scope, restricted, summary, plans
+            FROM calendar WHERE date >= @from AND date <= @to{filter}
+            ORDER BY date
+            """;
+        cmd.Parameters.AddWithValue("@from", from);
+        cmd.Parameters.AddWithValue("@to", to);
+        bind?.Invoke(cmd);
+        return ReadCalendarEntries(cmd);
+    }
+
+    public void UpsertCalendarPlans(string date, string plans, string? scope, bool restricted)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO calendar (date, scope, restricted, plans, created_at, updated_at)
+            VALUES (@date, @scope, @restricted, @plans, @now, @now)
+            ON CONFLICT (date, COALESCE(scope, ''), restricted)
+            DO UPDATE SET plans = @plans, updated_at = @now
+            """;
+        cmd.Parameters.AddWithValue("@date", date);
+        cmd.Parameters.AddWithValue("@scope", (object?)scope ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@restricted", restricted ? 1 : 0);
+        cmd.Parameters.AddWithValue("@plans", plans);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void UpsertCalendarSummary(string date, string summary, string? scope, bool restricted)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("o");
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO calendar (date, scope, restricted, summary, created_at, updated_at)
+            VALUES (@date, @scope, @restricted, @summary, @now, @now)
+            ON CONFLICT (date, COALESCE(scope, ''), restricted)
+            DO UPDATE SET summary = @summary, updated_at = @now
+            """;
+        cmd.Parameters.AddWithValue("@date", date);
+        cmd.Parameters.AddWithValue("@scope", (object?)scope ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@restricted", restricted ? 1 : 0);
+        cmd.Parameters.AddWithValue("@summary", summary);
+        cmd.Parameters.AddWithValue("@now", now);
+        cmd.ExecuteNonQuery();
+    }
+
+    public List<DiaryEntry> GetEntriesByDate(string date, AccessLevel level, string? scope)
+    {
+        var (filter, bind) = AccessFilter(level, scope);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT id, created_at, content, tags, conversation_id
+            FROM entries
+            WHERE date(created_at) = @date{filter}
+            ORDER BY created_at
+            """;
+        cmd.Parameters.AddWithValue("@date", date);
+        bind?.Invoke(cmd);
+        return ReadEntries(cmd);
+    }
+
+    public List<string> GetDatesWithEntries(AccessLevel level, string? scope)
+    {
+        var (filter, bind) = AccessFilter(level, scope);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT DISTINCT date(created_at) as d FROM entries
+            WHERE 1=1{filter}
+            ORDER BY d
+            """;
+        bind?.Invoke(cmd);
+        var dates = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            dates.Add(reader.GetString(0));
+        return dates;
+    }
+
+    private static (string Filter, Action<SqliteCommand>? Bind) CalendarAccessFilter(
+        AccessLevel level, string? scope, string prefix = "AND")
+    {
+        return level switch
+        {
+            AccessLevel.Guardian => ("", null),
+            AccessLevel.Coding =>
+                ($" {prefix} scope IS NULL AND restricted = 0", null),
+            AccessLevel.Scoped =>
+                ($" {prefix} scope = @scope", cmd => cmd.Parameters.AddWithValue("@scope", scope!)),
+            _ => ($" {prefix} 1 = 0", null),
+        };
+    }
+
+    private static List<CalendarEntry> ReadCalendarEntries(SqliteCommand cmd)
+    {
+        var entries = new List<CalendarEntry>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            entries.Add(new CalendarEntry(
+                Date: reader.GetString(0),
+                Scope: reader.IsDBNull(1) ? null : reader.GetString(1),
+                Restricted: reader.GetInt32(2) != 0,
+                Summary: reader.IsDBNull(3) ? null : reader.GetString(3),
+                Plans: reader.IsDBNull(4) ? null : reader.GetString(4)));
+        }
+        return entries;
+    }
+
     // ── Health Data ──────────────────────────────────────────────
 
     public HealthEntry? GetHealthByDate(string date)
@@ -826,6 +954,13 @@ public class DiaryDatabase : IDisposable
         GC.SuppressFinalize(this);
     }
 }
+
+public record CalendarEntry(
+    string Date,
+    string? Scope,
+    bool Restricted,
+    string? Summary,
+    string? Plans);
 
 public record HealthEntry(string Date, string Summary);
 

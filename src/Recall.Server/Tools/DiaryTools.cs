@@ -240,6 +240,113 @@ public class DiaryTools
         return $"Entry #{id} marked as {status}.";
     }
 
+    [McpServerTool(Name = "diary_plan")]
+    [Description("Set or update plans for a specific date. Works for future dates (upcoming plans) or past dates (what was planned). Replaces any existing plans for that date.")]
+    public static string Plan(
+        DiaryDatabase db,
+        RecallConfig config,
+        [Description("Date in YYYY-MM-DD format")] string date,
+        [Description("Plans text for this date")] string plans,
+        [Description("Set true if plans contain restricted/private content")] bool restricted = false,
+        [Description("Access secret")] string? secret = null)
+    {
+        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
+        if (access != AccessLevel.Guardian)
+            restricted = false;
+
+        string? scope = access == AccessLevel.Scoped ? userScope : null;
+
+        db.UpsertCalendarPlans(date, plans, scope, restricted);
+        var rNote = restricted ? " [restricted]" : "";
+        return $"Plans for {date} saved{rNote}.";
+    }
+
+    [McpServerTool(Name = "diary_day")]
+    [Description("View a specific day: plans, summary, and linked diary entries. Use to review what happened on a date or what's planned.")]
+    public static string Day(
+        DiaryDatabase db,
+        RecallConfig config,
+        [Description("Date in YYYY-MM-DD format")] string date,
+        [Description("Access secret")] string? secret = null)
+    {
+        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
+        var scope = access == AccessLevel.Scoped ? userScope : null;
+
+        var calendar = db.GetCalendarDay(date, access, scope);
+        var entries = db.GetEntriesByDate(date, access, scope);
+
+        var lines = new List<string> { $"=== {date} ===" };
+
+        // Plans
+        var plans = calendar.Where(c => !string.IsNullOrEmpty(c.Plans)).ToList();
+        if (plans.Count > 0)
+        {
+            lines.Add("\n-- Plans --");
+            foreach (var p in plans)
+            {
+                var label = p.Restricted ? " [restricted]" : "";
+                if (p.Scope != null) label += $" [scope: {p.Scope}]";
+                lines.Add($"{p.Plans}{label}");
+            }
+        }
+
+        // Summaries
+        var summaries = calendar.Where(c => !string.IsNullOrEmpty(c.Summary)).ToList();
+        if (summaries.Count > 0)
+        {
+            lines.Add("\n-- Summary --");
+            foreach (var s in summaries)
+            {
+                var label = s.Restricted ? " [restricted]" : "";
+                if (s.Scope != null) label += $" [scope: {s.Scope}]";
+                lines.Add($"{s.Summary}{label}");
+            }
+        }
+
+        // Linked diary entries
+        if (entries.Count > 0)
+        {
+            lines.Add($"\n-- Diary entries ({entries.Count}) --");
+            lines.Add(FormatEntries(entries));
+        }
+        else
+        {
+            lines.Add("\nNo diary entries for this date.");
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    [McpServerTool(Name = "diary_summarize")]
+    [Description("Store or update a daily summary for a specific date. Call this after reviewing the day's diary entries to create a condensed record.")]
+    public static string Summarize(
+        DiaryDatabase db,
+        RecallConfig config,
+        [Description("Date in YYYY-MM-DD format")] string date,
+        [Description("Summary text for this date")] string summary,
+        [Description("Set true if summary contains restricted/private content")] bool restricted = false,
+        [Description("Access secret")] string? secret = null)
+    {
+        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
+        if (access != AccessLevel.Guardian)
+            restricted = false;
+
+        string? scope = access == AccessLevel.Scoped ? userScope : null;
+
+        db.UpsertCalendarSummary(date, summary, scope, restricted);
+        var rNote = restricted ? " [restricted]" : "";
+        return $"Summary for {date} saved{rNote}.";
+    }
+
     private static string FormatFoundationalIndex(List<DiaryEntry> entries)
     {
         var lines = new List<string> { "Foundation:" };
