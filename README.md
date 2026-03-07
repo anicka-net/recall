@@ -19,6 +19,9 @@ Recall is an [MCP server](https://modelcontextprotocol.io/) that stores diary en
 | `diary_update` | Edit an existing entry |
 | `diary_list_recent` | List recent entries chronologically |
 | `diary_pin` | Pin/unpin entries or mark as foundational (privileged only) |
+| `diary_plan` | Set plans for a specific date (future or past) |
+| `diary_day` | View a day: plans, summary, and linked diary entries |
+| `diary_summarize` | Store or update a daily summary for a date |
 | `diary_time` | Current date/time (so the AI knows when it is) |
 | `health_query` | Search health/fitness data (sleep, HR, steps, SpO2) |
 | `health_recent` | Recent health summaries |
@@ -229,6 +232,40 @@ Aging runs lazily at the start of each `diary_context` call. Thresholds are conf
 
 Both features are privileged-only.
 
+## Calendar
+
+The calendar provides a day-level view of your diary: plans, summaries, and linked entries.
+
+### How it works
+
+Each date can have a calendar entry with two fields:
+- **Plans** — what you intend to do (can be set for future dates)
+- **Summary** — a condensed record of what happened (written after the fact)
+
+Diary entries are linked to calendar days automatically by their creation date. Call `diary_day` with a date to see everything in one view.
+
+### Access control
+
+Calendar entries follow the same access model as diary entries:
+
+| Level | Sees | Can create |
+|-------|------|------------|
+| **Privileged** | all calendar entries (any scope, restricted or not) | restricted and unrestricted |
+| **Coding** | unscoped, unrestricted only | unrestricted only |
+| **Scoped** | own scope only | own scope only |
+
+A single date can have multiple calendar entries with different access levels. For example, a privileged user might write both a restricted summary (containing private details) and an unrestricted summary (safe for coding sessions) for the same day. The `restricted` flag on calendar entries controls visibility the same way it does for diary entries.
+
+### Generating summaries
+
+Summaries are stored text, not auto-generated. The intended workflow:
+
+1. Call `diary_day` for a date to review the entries
+2. Write a concise summary
+3. Call `diary_summarize` to store it
+
+This can be done manually or scripted as a batch operation across historical dates.
+
 ## Health data integration
 
 Recall can store daily health summaries from Fitbit (sleep, heart rate, activity, SpO2) and menstrual cycle tracking. The `tools/` directory contains:
@@ -414,8 +451,8 @@ It uses the same OAuth passphrase as Recall — no separate auth setup.
 ## Building
 
 ```bash
-dotnet build              # Build
-dotnet test               # Run tests (when available)
+dotnet build                       # Build
+dotnet test src/Recall.Tests       # Run tests
 ```
 
 ## License

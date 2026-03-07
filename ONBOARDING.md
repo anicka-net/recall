@@ -115,6 +115,9 @@ contact the admin.
 - **diary_context** — get relevant context at conversation start
 - **diary_list_recent** — list recent entries
 - **diary_update** — edit your own entries
+- **diary_plan** — set plans for a date
+- **diary_day** — view a day (plans, summary, and entries)
+- **diary_summarize** — store a daily summary
 - **diary_time** — get current time (no secret needed)
 
 ## What you cannot do
