@@ -62,14 +62,14 @@ chmod +x ~/.claude/hooks/recall-scope.sh
 If `~/.claude/settings.json` does not exist, create it. If it exists,
 merge the `hooks` section into the existing file.
 
-The hook must match all Recall diary tools:
+The hook must match all Recall tools that accept a secret parameter:
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__claude_ai_Recall__diary_.*",
+        "matcher": "mcp__claude_ai_Recall__(diary|diary_search|diary_day|health)",
         "hooks": [
           {
             "type": "command",
@@ -90,10 +90,10 @@ Exit and restart Claude Code so it picks up the new settings.
 
 After restarting, try these commands to verify your setup:
 
-- `diary_context` with topic "test" — should return your scoped entries
+- `diary_search` action=context query="test" — should return your scoped entries
   (empty if this is a fresh scope, which is expected)
-- `diary_write` with any test content — should succeed and show `[scope: ...]`
-- `diary_list_recent` — should show only entries you wrote
+- `diary` action=write with any test content — should succeed and show `[scope: ...]`
+- `diary_search` action=list — should show only entries you wrote
 
 If you see "Access denied", your secret is wrong or not configured on the server.
 If you see entries that aren't yours, something is misconfigured — stop and
@@ -110,14 +110,15 @@ contact the admin.
 
 ## What you can do
 
-- **diary_write** — write entries (auto-tagged with your scope)
-- **diary_query** — search your entries
-- **diary_context** — get relevant context at conversation start
-- **diary_list_recent** — list recent entries
-- **diary_update** — edit your own entries
-- **diary_plan** — set plans for a date
-- **diary_day** — view a day (plans, summary, and entries)
-- **diary_summarize** — store a daily summary
+- **diary** action=write — write entries (auto-tagged with your scope)
+- **diary** action=update — edit your own entries
+- **diary** action=get — fetch a specific entry by ID
+- **diary_search** action=context — get relevant context at conversation start
+- **diary_search** action=query — search your entries
+- **diary_search** action=list — list recent entries
+- **diary_day** action=view — view a day (plans, summary, and entries)
+- **diary_day** action=plan — set plans for a date
+- **diary_day** action=summarize — store a daily summary
 - **diary_time** — get current time (no secret needed)
 
 ## What you cannot do

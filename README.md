@@ -2,29 +2,27 @@
 
 > **Note:** This is a personal learning project. I'm using it to learn C# and .NET by building something I actually use daily. It works on **Linux only** (the ONNX native library resolver is Linux-specific). PRs welcome but expect rough edges.
 
-A personal diary MCP server with persistent memory and semantic search.
+A personal diary MCP server with persistent memory, semantic search, health tracking, and grocery integration.
 
 Recall gives Claude (or any MCP-compatible AI) access to your past conversations. Every new conversation starts with relevant context retrieved automatically, so the AI always knows what you've discussed before.
 
 ## How it works
 
-Recall is an [MCP server](https://modelcontextprotocol.io/) that stores diary entries in SQLite with vector embeddings for semantic search (all-MiniLM-L6-v2 via ONNX Runtime). Tools:
+Recall is an [MCP server](https://modelcontextprotocol.io/) that stores diary entries in SQLite with vector embeddings for semantic search (all-MiniLM-L6-v2 via ONNX Runtime). Tools use an action-parameter pattern to keep the tool count low:
 
-| Tool | Purpose |
-|------|---------|
-| `diary_context` | Auto-fetch relevant past entries at conversation start |
-| `diary_write` | Record an entry with optional tags |
-| `diary_query` | Search past entries by meaning (semantic search) |
-| `diary_get` | Fetch a specific entry by ID |
-| `diary_update` | Edit an existing entry |
-| `diary_list_recent` | List recent entries chronologically |
-| `diary_pin` | Pin/unpin entries or mark as foundational (privileged only) |
-| `diary_plan` | Set plans for a specific date (future or past) |
-| `diary_day` | View a day: plans, summary, and linked diary entries |
-| `diary_summarize` | Store or update a daily summary for a date |
-| `diary_time` | Current date/time (so the AI knows when it is) |
-| `health_query` | Search health/fitness data (sleep, HR, steps, SpO2) |
-| `health_recent` | Recent health summaries |
+| Tool | Actions | Purpose |
+|------|---------|---------|
+| `diary` | write, update, get, pin | Create, edit, fetch, or pin diary entries |
+| `diary_search` | context, query, list | Find entries: conversation start context, keyword search, recent list |
+| `diary_day` | view, plan, summarize | Day-level view, set plans, store daily summaries |
+| `diary_time` | — | Current date/time (so the AI knows when it is) |
+| `health` | recent, query, log_migraine, log_period | Health/fitness data, migraine and cycle tracking |
+| `rohlik_search` | search, last_minute | Search Rohlik.cz grocery products |
+| `rohlik_cart` | view, add, remove, update, check | Shopping cart management |
+| `rohlik_orders` | history, detail, upcoming | Order history and tracking |
+| `rohlik_delivery` | info, slots, reserve | Delivery timeslots |
+| `rohlik_account` | premium, announcements, bags, checkout, shopping_list | Account info |
+| `rohlik_checkout` | submit, pay | Order submission and payment (TOTP-protected) |
 
 ## Quick start
 
@@ -56,11 +54,14 @@ Config file: `~/.recall/config.json`
   "systemPrompt": "Custom instructions for the AI",
   "promptFile": "~/.recall/prompt.txt",
   "autoContextLimit": 5,
-  "searchResultLimit": 10
+  "searchResultLimit": 10,
+  "rohlikUsername": "user@example.com",
+  "rohlikPassword": "password",
+  "rohlikBaseUrl": "https://www.rohlik.cz"
 }
 ```
 
-All fields are optional. Defaults work out of the box.
+All fields are optional. Defaults work out of the box. Rohlik tools are only registered when credentials are present.
 
 ### Data storage
 
@@ -105,7 +106,7 @@ Both methods work simultaneously. Without any configured, the server runs open.
 
 ### Tool-level: four-tier access
 
-Every tool call (except `diary_time`) requires a `secret` parameter. The server hashes it and compares against configured hashes to determine the access level:
+Every diary/health tool call (except `diary_time`) requires a `secret` parameter. The server hashes it and compares against configured hashes to determine the access level. When no auth hashes are configured at all, the server defaults to privileged access (for local-only use). Rohlik tools have no access control (they're gated by whether credentials are configured).
 
 | Level | Diary | Health | Pin/foundational | Write restricted |
 |-------|-------|--------|------------------|------------------|
@@ -209,13 +210,13 @@ Restart the service. Give the passphrase to the user — see [ONBOARDING.md](ONB
 
 As entries accumulate, older ones are automatically deprioritized so recent context stays relevant. Entries move through three tiers:
 
-| Tier | Name | Age | `diary_context` | `diary_query` | `diary_list_recent` |
-|------|------|-----|-----------------|---------------|---------------------|
+| Tier | Name | Age | `diary_search` context | `diary_search` query | `diary_search` list |
+|------|------|-----|------------------------|----------------------|---------------------|
 | 0 | hot | < 7 days | recent + search | yes | yes |
 | 1 | warm | 7–90 days | search only | yes | no |
 | 2 | cold | > 90 days | no | yes | no |
 
-Aging runs lazily at the start of each `diary_context` call. Thresholds are configurable:
+Aging runs lazily at the start of each `diary_search` action=context call. Thresholds are configurable:
 
 ```json
 {
@@ -226,9 +227,9 @@ Aging runs lazily at the start of each `diary_context` call. Thresholds are conf
 
 ### Pinning and foundational entries
 
-**Pinned** entries (`diary_pin id=42`) are exempt from auto-aging — they stay at their current tier forever.
+**Pinned** entries (`diary` action=pin id=42) are exempt from auto-aging — they stay at their current tier forever.
 
-**Foundational** entries (`diary_pin id=42 foundational=true`) are pinned and additionally always shown at the top of `diary_context` for privileged users. They appear as a compact index (ID + first line), with `diary_get` available for full content. Useful for reference material that should always be in context.
+**Foundational** entries (`diary` action=pin id=42 foundational=true) are pinned and additionally always shown at the top of `diary_search` action=context for privileged users. They appear as a compact index (ID + first line), with `diary` action=get available for full content. Useful for reference material that should always be in context.
 
 Both features are privileged-only.
 
@@ -242,7 +243,7 @@ Each date can have a calendar entry with two fields:
 - **Plans** — what you intend to do (can be set for future dates)
 - **Summary** — a condensed record of what happened (written after the fact)
 
-Diary entries are linked to calendar days automatically by their creation date. Call `diary_day` with a date to see everything in one view.
+Diary entries are linked to calendar days automatically by their creation date. Call `diary_day` action=view with a date to see everything in one view.
 
 ### Access control
 
@@ -260,23 +261,33 @@ A single date can have multiple calendar entries with different access levels. F
 
 Summaries are stored text, not auto-generated. The intended workflow:
 
-1. Call `diary_day` for a date to review the entries
+1. Call `diary_day` action=view for a date to review the entries
 2. Write a concise summary
-3. Call `diary_summarize` to store it
+3. Call `diary_day` action=summarize to store it
 
 This can be done manually or scripted as a batch operation across historical dates.
 
 ## Health data integration
 
-Recall can store daily health summaries from Fitbit (sleep, heart rate, activity, SpO2) and menstrual cycle tracking. The `tools/` directory contains:
+Recall can store daily health summaries from Fitbit (sleep, heart rate, activity, SpO2), weather data, menstrual cycle tracking, and migraine tracking. The `tools/` directory contains:
 
 | Script | Purpose |
 |--------|---------|
-| `tools/fitbit-sync.py` | Fetch Fitbit data via API, write to recall.db |
-| `tools/fitbit-cron.sh` | Hourly cron job: sync + push to remote |
+| `tools/fitbit-sync.py` | Fetch Fitbit data via API, enrich with weather (Open-Meteo), write to recall.db |
+| `tools/fitbit-cron.sh` | Hourly cron job: sync + push to remote + migraine risk prediction |
 | `tools/cycle.py` | Menstrual cycle tracking with predictions |
+| `tools/migraine.py` | Migraine logging, history with weather/cycle context, 7-day risk prediction |
 
-Health data appears alongside diary entries through the `health_query` and `health_recent` MCP tools.
+Health data appears through the `health` MCP tool (actions: recent, query). Migraines and period starts can be logged directly via the `health` tool (actions: log_migraine, log_period) or via the CLI scripts.
+
+### Migraine prediction
+
+`migraine.py predict` fetches a 7-day weather forecast and scores each day for migraine risk based on:
+- Barometric pressure drops (>5 hPa = moderate, >10 hPa = high risk)
+- Menstrual cycle phase (menstrual = high, ovulatory = moderate)
+- Temperature swings (>12°C daily range)
+
+Risk predictions are written to the calendar table so they appear in `diary_day` views.
 
 ## Deployment
 
@@ -340,7 +351,7 @@ The SQLite database is preserved across restarts. Schema migrations run automati
 
 ### Proxying external MCP servers
 
-Recall can act as an OAuth gateway for other MCP servers. Any stdio-based MCP server wrapped in [supergateway](https://www.npmjs.com/package/supergateway) can be proxied through Recall's existing auth — no additional OAuth setup needed.
+Recall can act as an OAuth gateway for other MCP servers. Any stdio-based MCP server wrapped in [supergateway](https://www.npmjs.com/package/supergateway) can be proxied through Recall's existing auth — no additional OAuth setup needed. (Note: Rohlik grocery tools are now integrated directly into the recall server binary, not proxied.)
 
 **How it works:**
 
@@ -429,23 +440,21 @@ It uses the same OAuth passphrase as Recall — no separate auth setup.
 ## Architecture
 
 ```
-┌──────────────────────────────────────┐
-│          Recall MCP Server           │
-│  SQLite + vector search + OAuth 2.1  │
-│                                      │
-│  /sse, /message  →  diary & health   │
-│  /{prefix}/*     →  proxy to backend │
-└─────────┬────────────────┬───────────┘
-          │                │
-    MCP protocol     reverse proxy
-          │                │
-  ┌───────┴───────┐  ┌─────┴──────────┐
-  │  Claude Code  │  │  supergateway  │
-  │   claude.ai   │  │  (port 8385)   │
-  │   any client  │  │       │        │
-  └───────────────┘  │  stdio MCP     │
-                     │  server        │
-                     └────────────────┘
+┌─────────────────────────────────────────────┐
+│             Recall MCP Server               │
+│  SQLite + vector search + OAuth 2.1         │
+│                                             │
+│  /sse, /message  →  diary, health, rohlik   │
+│  /{prefix}/*     →  proxy to backend (opt)  │
+└──────┬──────────────────┬───────────────────┘
+       │                  │
+  MCP protocol      reverse proxy (opt)
+       │                  │
+  ┌────┴────────┐   ┌─────┴──────────┐
+  │ Claude Code │   │  supergateway  │
+  │  claude.ai  │   │  (external     │
+  │  any client │   │   MCP servers) │
+  └─────────────┘   └────────────────┘
 ```
 
 ## Building

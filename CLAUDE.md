@@ -13,16 +13,17 @@ You have no memory between conversations. This is a problem, because the person
 you're working with has been at this for weeks, and you're starting from zero
 every time. Recall fixes this, provided you actually use it.
 
-**Start of conversation**: call `diary_context` with a brief topic summary.
-You'll get recent entries and entries matching the topic. Read them. This is how
-you avoid asking "what are we working on?" when the answer was written down
-yesterday by a previous instance of you.
+**Start of conversation**: call `diary_search` action=context with a brief topic
+as the query. You'll get recent entries and entries matching the topic. Read them.
+This is how you avoid asking "what are we working on?" when the answer was
+written down yesterday by a previous instance of you.
 
-**During the conversation**: use `diary_query` when you need context about past
-decisions. The answer is often already in there.
+**During the conversation**: use `diary_search` action=query when you need context
+about past decisions. The answer is often already in there.
 
-**End of conversation**: call `diary_write` to record what happened. Decisions
-made, things shipped, bugs found, problems still open. Use comma-separated tags.
+**End of conversation**: call `diary` action=write to record what happened.
+Decisions made, things shipped, bugs found, problems still open. Use
+comma-separated tags.
 
 The key insight is that you're not writing for yourself — you won't be here
 next time. You're writing for the next instance, who will be just as clueless
@@ -32,12 +33,16 @@ scope mismatch in MCP library" is useful.
 
 ### Tools
 
-- `diary_context` — Call first, every conversation. Returns past context + a conversation ID.
-- `diary_write` — Record an entry. Include tags (e.g. `project-x,decision,deployment`).
-- `diary_query` — Search past entries by keywords or natural language.
-- `diary_update` — Edit an existing entry by ID.
-- `diary_list_recent` — Browse recent entries chronologically.
+- `diary_search` action=context — Call first, every conversation. Returns past context + a conversation ID.
+- `diary` action=write — Record an entry. Include tags (e.g. `project-x,decision,deployment`).
+- `diary_search` action=query — Search past entries by keywords or natural language.
+- `diary` action=update — Edit an existing entry by ID.
+- `diary` action=get — Fetch a specific entry by ID.
+- `diary_search` action=list — Browse recent entries chronologically.
+- `diary_day` action=view/plan/summarize — Day-level operations.
 - `diary_time` — Get current date/time/day of week.
+- `health` action=recent/query — Health and fitness data.
+- `health` action=log_migraine/log_period — Track migraines and cycle.
 
 ## 2) Working style
 
