@@ -15,20 +15,45 @@ public class DiaryTools
         return $"{now:yyyy-MM-dd HH:mm:ss zzz} ({now:dddd})";
     }
 
-    [McpServerTool(Name = "diary_write")]
-    [Description("Write a diary entry. Record thoughts, events, decisions, insights, or anything worth remembering. Be specific and detailed.")]
-    public static string Write(
+    // ── diary (write/update/get/pin) ──────────────────────────
+
+    [McpServerTool(Name = "diary")]
+    [Description("Diary entry operations. Actions: 'write' (new entry), 'update' (edit existing), 'get' (by ID), 'pin' (pin/unpin entry).")]
+    public static string Entry(
         DiaryDatabase db,
         RecallConfig config,
-        [Description("The diary entry text")] string content,
-        [Description("Optional comma-separated tags (e.g. 'work,decision,project-x')")] string? tags = null,
-        [Description("Optional conversation ID to group related entries")] string? conversationId = null,
-        [Description("Set false to make entry visible to all sessions (default: restricted for authenticated sessions, unrestricted for stdio)")] bool restricted = true,
+        [Description("Action: write, update, get, pin")] string action = "write",
+        [Description("Entry ID (for get/update/pin)")] int? id = null,
+        [Description("Entry text (for write/update)")] string? content = null,
+        [Description("Comma-separated tags (for write/update)")] string? tags = null,
+        [Description("Conversation ID (for write)")] string? conversationId = null,
+        [Description("Restrict entry to guardian (for write)")] bool restricted = true,
+        [Description("Pin the entry (for pin)")] bool pin = true,
+        [Description("Mark as foundational (for pin)")] bool foundational = false,
         [Description("Access secret")] string? secret = null)
     {
         var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
         if (access == AccessLevel.None)
             return "Access denied. Provide a valid secret.";
+
+        return action switch
+        {
+            "write" => DoWrite(db, access, userScope, content, tags, conversationId, restricted),
+            "update" when id != null => DoUpdate(db, access, userScope, id.Value, content ?? "", tags),
+            "update" => "Provide id to update.",
+            "get" when id != null => DoGet(db, access, userScope, id.Value),
+            "get" => "Provide id.",
+            "pin" when id != null => DoPin(db, access, id.Value, pin, foundational),
+            "pin" => "Provide id to pin.",
+            _ => $"Unknown action '{action}'. Use: write, update, get, pin"
+        };
+    }
+
+    private static string DoWrite(DiaryDatabase db, AccessLevel access, string? userScope,
+        string? content, string? tags, string? conversationId, bool restricted)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return "Provide content to write.";
 
         // Auto-prepend date header if not already present
         if (!content.StartsWith("**Date:", StringComparison.OrdinalIgnoreCase)
@@ -39,37 +64,21 @@ public class DiaryTools
             content = $"{dateHeader}\n\n{content}";
         }
 
-        // Only guardian can write restricted entries
         if (access != AccessLevel.Guardian)
             restricted = false;
 
-        // Scoped users always write to their scope
         string? scope = access == AccessLevel.Scoped ? userScope : null;
-
         var id = db.WriteEntry(content, tags, conversationId, restricted: restricted, scope: scope);
         var scopeNote = scope != null ? $" [scope: {scope}]" : "";
         return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}{(restricted ? " [restricted]" : "")}{scopeNote}.";
     }
 
-    [McpServerTool(Name = "diary_update")]
-    [Description("Update an existing diary entry. Replaces the content and tags of the specified entry. The created_at timestamp is preserved.")]
-    public static string Update(
-        DiaryDatabase db,
-        RecallConfig config,
-        [Description("The ID of the entry to update")] int id,
-        [Description("The new content for the entry")] string content,
-        [Description("Optional new tags (replaces existing tags)")] string? tags = null,
-        [Description("Access secret")] string? secret = null)
+    private static string DoUpdate(DiaryDatabase db, AccessLevel access, string? userScope,
+        int id, string content, string? tags)
     {
-        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
-        if (access == AccessLevel.None)
-            return "Access denied. Provide a valid secret.";
-
-        // Coding can't edit restricted entries
         if (access == AccessLevel.Coding && db.IsEntryRestricted(id))
             return $"Entry #{id} is restricted. Guardian access required to edit.";
 
-        // Scoped users can only edit entries in their scope
         if (access == AccessLevel.Scoped)
         {
             var entryScope = db.GetEntryScope(id);
@@ -78,29 +87,15 @@ public class DiaryTools
         }
 
         var success = db.UpdateEntry(id, content, tags);
-        if (!success)
-            return $"Entry #{id} not found.";
-
+        if (!success) return $"Entry #{id} not found.";
         return $"Entry #{id} updated at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}.";
     }
 
-    [McpServerTool(Name = "diary_get")]
-    [Description("Get a specific diary entry by its ID number.")]
-    public static string GetEntry(
-        DiaryDatabase db,
-        RecallConfig config,
-        [Description("The entry ID number")] int id,
-        [Description("Access secret")] string? secret = null)
+    private static string DoGet(DiaryDatabase db, AccessLevel access, string? userScope, int id)
     {
-        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
-        if (access == AccessLevel.None)
-            return "Access denied. Provide a valid secret.";
-
         var entry = db.GetEntry(id);
-        if (entry == null)
-            return $"Entry #{id} not found.";
+        if (entry == null) return $"Entry #{id} not found.";
 
-        // Access control: check scope and restricted
         if (access == AccessLevel.Scoped)
         {
             var entryScope = db.GetEntryScope(id);
@@ -108,56 +103,60 @@ public class DiaryTools
                 return $"Entry #{id} is not in your scope.";
         }
         else if (access == AccessLevel.Coding && db.IsEntryRestricted(id))
-        {
             return $"Entry #{id} is restricted. Guardian access required.";
-        }
 
         return FormatEntries([entry]);
     }
 
-    [McpServerTool(Name = "diary_query")]
-    [Description("Search past diary entries using natural language. Use keywords or phrases to find specific topics, events, or decisions.")]
-    public static string Query(
-        DiaryDatabase db,
-        RecallConfig config,
-        [Description("Search words or phrase")] string query,
-        [Description("Max results to return (default: from config)")] int limit = 0,
-        [Description("Access secret")] string? secret = null)
+    private static string DoPin(DiaryDatabase db, AccessLevel access, int id, bool pin, bool foundational)
     {
-        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
-        if (access == AccessLevel.None)
-            return "Access denied. Provide a valid secret.";
+        if (access != AccessLevel.Guardian)
+            return "Only guardian can pin entries.";
 
-        var scope = access == AccessLevel.Scoped ? userScope : null;
+        var success = db.SetPin(id, pin, foundational);
+        if (!success) return $"Entry #{id} not found.";
 
-        var effectiveLimit = limit > 0 ? limit : config.SearchResultLimit;
-        var results = db.Search(query, effectiveLimit, access, scope, maxTier: 2);
-        if (results.Count == 0)
-            return "No entries found matching your query.";
-
-        return FormatEntries(results);
+        var status = foundational ? "foundational + pinned"
+            : pin ? "pinned" : "unpinned";
+        return $"Entry #{id} marked as {status}.";
     }
 
-    [McpServerTool(Name = "diary_context")]
-    [Description("Get relevant diary context for the current conversation. Call this at the START of every conversation with a brief topic summary. Returns recent entries plus entries matching the topic.")]
-    public static string GetContext(
+    // ── diary_search (query/list/context) ─────────────────────
+
+    [McpServerTool(Name = "diary_search")]
+    [Description("Find diary entries. Actions: 'context' (call at conversation START with topic), 'query' (search by keywords), 'list' (recent entries).")]
+    public static string Search(
         DiaryDatabase db,
         RecallConfig config,
-        [Description("Brief summary of what this conversation is about")] string topic,
+        [Description("Action: context, query, list")] string action = "context",
+        [Description("Search query or conversation topic")] string? query = null,
+        [Description("Max results (for query/list)")] int limit = 0,
         [Description("Access secret")] string? secret = null)
     {
         var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
         if (access == AccessLevel.None)
             return "Access denied. Provide a valid secret.";
 
-        var conversationId = Guid.NewGuid().ToString("N")[..12];
-        var limit = config.AutoContextLimit;
         var scope = access == AccessLevel.Scoped ? userScope : null;
 
-        // 1. Run aging
+        return action switch
+        {
+            "context" => DoContext(db, config, access, scope, query ?? "general"),
+            "query" when query != null => DoQuery(db, config, access, scope, query, limit),
+            "query" => "Provide query to search.",
+            "list" => DoList(db, access, scope, limit > 0 ? limit : 10),
+            _ => $"Unknown action '{action}'. Use: context, query, list"
+        };
+    }
+
+    private static string DoContext(DiaryDatabase db, RecallConfig config,
+        AccessLevel access, string? scope, string topic)
+    {
+        var conversationId = Guid.NewGuid().ToString("N")[..12];
+        var limit = config.AutoContextLimit;
+
         db.RunAging(config.TierHotDays, config.TierWarmDays);
 
-        // 2. Foundational entries (Guardian only)
         string foundationalSection = "";
         if (access == AccessLevel.Guardian)
         {
@@ -166,13 +165,9 @@ public class DiaryTools
                 foundationalSection = FormatFoundationalIndex(found) + "\n";
         }
 
-        // 3. Recent (tier 0 only)
         var recent = db.GetRecent(3, access, scope, maxTier: 0);
-
-        // 4. Semantic search (tier 0 + 1 = hot + warm)
         var relevant = db.Search(topic, limit, access, scope, maxTier: 1);
 
-        // 5. Merge and deduplicate
         var seen = new HashSet<int>();
         var merged = new List<DiaryEntry>();
         foreach (var e in recent.Concat(relevant))
@@ -186,7 +181,6 @@ public class DiaryTools
             .Take(limit + 3)
             .ToList();
 
-        // 6. Tier counts
         var (hot, warm, cold) = db.GetTierCounts(access, scope);
 
         if (sorted.Count == 0 && string.IsNullOrEmpty(foundationalSection))
@@ -198,78 +192,35 @@ public class DiaryTools
         return header + foundationalSection + FormatEntries(sorted);
     }
 
-    [McpServerTool(Name = "diary_list_recent")]
-    [Description("List the most recent diary entries in chronological order.")]
-    public static string ListRecent(
-        DiaryDatabase db,
-        RecallConfig config,
-        [Description("Number of entries to return (default: 10)")] int count = 10,
-        [Description("Access secret")] string? secret = null)
+    private static string DoQuery(DiaryDatabase db, RecallConfig config,
+        AccessLevel access, string? scope, string query, int limit)
     {
-        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
-        if (access == AccessLevel.None)
-            return "Access denied. Provide a valid secret.";
+        var effectiveLimit = limit > 0 ? limit : config.SearchResultLimit;
+        var results = db.Search(query, effectiveLimit, access, scope, maxTier: 2);
+        if (results.Count == 0)
+            return "No entries found matching your query.";
+        return FormatEntries(results);
+    }
 
-        var scope = access == AccessLevel.Scoped ? userScope : null;
+    private static string DoList(DiaryDatabase db, AccessLevel access, string? scope, int count)
+    {
         var entries = db.GetRecent(count, access, scope, maxTier: 0);
         if (entries.Count == 0)
             return "No diary entries yet.";
-
         return FormatEntries(entries);
     }
 
-    [McpServerTool(Name = "diary_pin")]
-    [Description("Pin or unpin a diary entry. Pinned entries don't auto-age between tiers. Foundational entries are always loaded in context summary.")]
-    public static string Pin(
-        DiaryDatabase db,
-        RecallConfig config,
-        [Description("The entry ID to pin/unpin")] int id,
-        [Description("Access secret")] string? secret = null,
-        [Description("Pin the entry (prevents aging)")] bool pin = true,
-        [Description("Mark as foundational (always in context)")] bool foundational = false)
-    {
-        var (access, _) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
-        if (access != AccessLevel.Guardian)
-            return "Only guardian can pin entries.";
-
-        var success = db.SetPin(id, pin, foundational);
-        if (!success) return $"Entry #{id} not found.";
-
-        var status = foundational ? "foundational + pinned"
-            : pin ? "pinned" : "unpinned";
-        return $"Entry #{id} marked as {status}.";
-    }
-
-    [McpServerTool(Name = "diary_plan")]
-    [Description("Set or update plans for a specific date. Works for future dates (upcoming plans) or past dates (what was planned). Replaces any existing plans for that date.")]
-    public static string Plan(
-        DiaryDatabase db,
-        RecallConfig config,
-        [Description("Date in YYYY-MM-DD format")] string date,
-        [Description("Plans text for this date")] string plans,
-        [Description("Set true if plans contain restricted/private content")] bool restricted = false,
-        [Description("Access secret")] string? secret = null)
-    {
-        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
-        if (access == AccessLevel.None)
-            return "Access denied. Provide a valid secret.";
-
-        if (access != AccessLevel.Guardian)
-            restricted = false;
-
-        string? scope = access == AccessLevel.Scoped ? userScope : null;
-
-        db.UpsertCalendarPlans(date, plans, scope, restricted);
-        var rNote = restricted ? " [restricted]" : "";
-        return $"Plans for {date} saved{rNote}.";
-    }
+    // ── diary_day (view/plan/summarize) ───────────────────────
 
     [McpServerTool(Name = "diary_day")]
-    [Description("View a specific day: plans, summary, and linked diary entries. Use to review what happened on a date or what's planned.")]
+    [Description("Day-level operations. Actions: 'view' (plans + summary + entries for a date), 'plan' (set plans), 'summarize' (store daily summary).")]
     public static string Day(
         DiaryDatabase db,
         RecallConfig config,
         [Description("Date in YYYY-MM-DD format")] string date,
+        [Description("Action: view, plan, summarize")] string action = "view",
+        [Description("Plans or summary text (for plan/summarize)")] string? content = null,
+        [Description("Restrict to guardian (for plan/summarize)")] bool restricted = false,
         [Description("Access secret")] string? secret = null)
     {
         var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
@@ -277,13 +228,26 @@ public class DiaryTools
             return "Access denied. Provide a valid secret.";
 
         var scope = access == AccessLevel.Scoped ? userScope : null;
+        if (access != AccessLevel.Guardian) restricted = false;
 
+        return action switch
+        {
+            "view" => DoView(db, access, scope, date),
+            "plan" when content != null => DoPlan(db, date, content, scope, restricted),
+            "plan" => "Provide content for the plan.",
+            "summarize" when content != null => DoSummarize(db, date, content, scope, restricted),
+            "summarize" => "Provide content for the summary.",
+            _ => $"Unknown action '{action}'. Use: view, plan, summarize"
+        };
+    }
+
+    private static string DoView(DiaryDatabase db, AccessLevel access, string? scope, string date)
+    {
         var calendar = db.GetCalendarDay(date, access, scope);
         var entries = db.GetEntriesByDate(date, access, scope);
 
         var lines = new List<string> { $"=== {date} ===" };
 
-        // Plans
         var plans = calendar.Where(c => !string.IsNullOrEmpty(c.Plans)).ToList();
         if (plans.Count > 0)
         {
@@ -296,7 +260,6 @@ public class DiaryTools
             }
         }
 
-        // Summaries
         var summaries = calendar.Where(c => !string.IsNullOrEmpty(c.Summary)).ToList();
         if (summaries.Count > 0)
         {
@@ -309,7 +272,6 @@ public class DiaryTools
             }
         }
 
-        // Linked diary entries
         if (entries.Count > 0)
         {
             lines.Add($"\n-- Diary entries ({entries.Count}) --");
@@ -323,29 +285,21 @@ public class DiaryTools
         return string.Join("\n", lines);
     }
 
-    [McpServerTool(Name = "diary_summarize")]
-    [Description("Store or update a daily summary for a specific date. Call this after reviewing the day's diary entries to create a condensed record.")]
-    public static string Summarize(
-        DiaryDatabase db,
-        RecallConfig config,
-        [Description("Date in YYYY-MM-DD format")] string date,
-        [Description("Summary text for this date")] string summary,
-        [Description("Set true if summary contains restricted/private content")] bool restricted = false,
-        [Description("Access secret")] string? secret = null)
+    private static string DoPlan(DiaryDatabase db, string date, string plans, string? scope, bool restricted)
     {
-        var (access, userScope) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
-        if (access == AccessLevel.None)
-            return "Access denied. Provide a valid secret.";
+        db.UpsertCalendarPlans(date, plans, scope, restricted);
+        var rNote = restricted ? " [restricted]" : "";
+        return $"Plans for {date} saved{rNote}.";
+    }
 
-        if (access != AccessLevel.Guardian)
-            restricted = false;
-
-        string? scope = access == AccessLevel.Scoped ? userScope : null;
-
+    private static string DoSummarize(DiaryDatabase db, string date, string summary, string? scope, bool restricted)
+    {
         db.UpsertCalendarSummary(date, summary, scope, restricted);
         var rNote = restricted ? " [restricted]" : "";
         return $"Summary for {date} saved{rNote}.";
     }
+
+    // ── Formatting ────────────────────────────────────────────
 
     private static string FormatFoundationalIndex(List<DiaryEntry> entries)
     {
@@ -365,7 +319,7 @@ public class DiaryTools
             }
             lines.Add($"  #{e.Id}{tagStr} {summary}");
         }
-        lines.Add("  (Use diary_get to read full content)");
+        lines.Add("  (Use diary action=get id=N to read full content)");
         return string.Join("\n", lines);
     }
 

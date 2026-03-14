@@ -33,6 +33,13 @@ public class DiaryDatabase : IDisposable
     public (AccessLevel Level, string? Scope) ResolveAccess(
         string? secret, string? guardianHash, string? codingHash, IReadOnlyList<ScopeEntry>? scopes = null)
     {
+        // If no auth is configured at all, default to guardian (local-only use)
+        var hasAnyAuth = !string.IsNullOrEmpty(guardianHash)
+                      || !string.IsNullOrEmpty(codingHash)
+                      || (scopes != null && scopes.Count > 0);
+        if (!hasAnyAuth)
+            return (AccessLevel.Guardian, null);
+
         if (string.IsNullOrEmpty(secret))
             return (AccessLevel.None, null);
         var hash = HashKey(secret);
@@ -665,6 +672,58 @@ public class DiaryDatabase : IDisposable
 
         Console.Error.WriteLine($"Backfilled {count}/{toBackfill.Count} entries.");
         return count;
+    }
+
+    // ── Migraine Log ────────────────────────────────────────────
+
+    public void LogMigraine(string date, int? severity, string? medication, string? notes)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS migraine_log (
+                date TEXT PRIMARY KEY,
+                severity INTEGER,
+                medication TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            """;
+        cmd.ExecuteNonQuery();
+
+        using var insert = _conn.CreateCommand();
+        insert.CommandText = """
+            INSERT OR REPLACE INTO migraine_log (date, severity, medication, notes, created_at)
+            VALUES (@date, @severity, @medication, @notes, @now)
+            """;
+        insert.Parameters.AddWithValue("@date", date);
+        insert.Parameters.AddWithValue("@severity", (object?)severity ?? DBNull.Value);
+        insert.Parameters.AddWithValue("@medication", (object?)medication ?? DBNull.Value);
+        insert.Parameters.AddWithValue("@notes", (object?)notes ?? DBNull.Value);
+        insert.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        insert.ExecuteNonQuery();
+    }
+
+    public void LogPeriodStart(string date, string? notes)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS cycle_starts (
+                date TEXT PRIMARY KEY,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            """;
+        cmd.ExecuteNonQuery();
+
+        using var insert = _conn.CreateCommand();
+        insert.CommandText = """
+            INSERT OR REPLACE INTO cycle_starts (date, notes, created_at)
+            VALUES (@date, @notes, @now)
+            """;
+        insert.Parameters.AddWithValue("@date", date);
+        insert.Parameters.AddWithValue("@notes", (object?)notes ?? DBNull.Value);
+        insert.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        insert.ExecuteNonQuery();
     }
 
     // ── API Key Management ─────────────────────────────────────

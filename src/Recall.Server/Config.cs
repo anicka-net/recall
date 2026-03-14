@@ -18,6 +18,9 @@ public class RecallConfig
     public List<ScopeEntry> Scopes { get; init; } = [];
     public int TierHotDays { get; init; } = 7;
     public int TierWarmDays { get; init; } = 90;
+    public string? RohlikUsername { get; init; }
+    public string? RohlikPassword { get; init; }
+    public string? RohlikBaseUrl { get; init; }
 
     public static RecallConfig Load()
     {
@@ -74,6 +77,9 @@ public class RecallConfig
             Scopes = file?.Scopes ?? [],
             TierHotDays = file?.TierHotDays ?? 7,
             TierWarmDays = file?.TierWarmDays ?? 90,
+            RohlikUsername = file?.RohlikUsername,
+            RohlikPassword = file?.RohlikPassword,
+            RohlikBaseUrl = file?.RohlikBaseUrl ?? "https://www.rohlik.cz",
         };
     }
 }
@@ -102,4 +108,7 @@ public class ConfigFile
     public List<ScopeEntry>? Scopes { get; set; }
     public int? TierHotDays { get; set; }
     public int? TierWarmDays { get; set; }
+    public string? RohlikUsername { get; set; }
+    public string? RohlikPassword { get; set; }
+    public string? RohlikBaseUrl { get; set; }
 }

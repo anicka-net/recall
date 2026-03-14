@@ -121,6 +121,12 @@ var embeddings = new EmbeddingService(recallConfig.ModelPath);
 var diaryDb = new DiaryDatabase(recallConfig.DatabasePath, embeddings);
 diaryDb.BackfillEmbeddings();
 
+// Optional: Rohlik grocery client (only if credentials configured)
+Recall.Server.Rohlik.RohlikClient? rohlikClient = null;
+if (!string.IsNullOrEmpty(recallConfig.RohlikUsername) && !string.IsNullOrEmpty(recallConfig.RohlikPassword))
+    rohlikClient = new Recall.Server.Rohlik.RohlikClient(
+        recallConfig.RohlikUsername, recallConfig.RohlikPassword, recallConfig.RohlikBaseUrl);
+
 if (httpMode)
 {
     // HTTP/SSE transport - for remote access (claude.ai, etc.)
@@ -128,8 +134,10 @@ if (httpMode)
 
     builder.Services.AddSingleton(recallConfig);
     builder.Services.AddSingleton(diaryDb);
+    if (rohlikClient != null)
+        builder.Services.AddSingleton(rohlikClient);
 
-    builder.Services
+    var mcpBuilder = builder.Services
         .AddMcpServer(options =>
         {
             options.ServerInfo = new() { Name = "recall", Version = "1.0.0" };
@@ -137,6 +145,9 @@ if (httpMode)
         .WithHttpTransport()
         .WithTools<Recall.Server.Tools.DiaryTools>()
         .WithTools<Recall.Server.Tools.HealthTools>();
+
+    if (rohlikClient != null)
+        mcpBuilder.WithTools<Recall.Server.Rohlik.RohlikTools>();
 
     var app = builder.Build();
 
@@ -230,14 +241,20 @@ else
     {
         services.AddSingleton(recallConfig);
         services.AddSingleton(diaryDb);
+        if (rohlikClient != null)
+            services.AddSingleton(rohlikClient);
 
-        services
+        var mcpBuilder = services
             .AddMcpServer(options =>
             {
                 options.ServerInfo = new() { Name = "recall", Version = "1.0.0" };
             })
             .WithStdioServerTransport()
-            .WithTools<Recall.Server.Tools.DiaryTools>();
+            .WithTools<Recall.Server.Tools.DiaryTools>()
+            .WithTools<Recall.Server.Tools.HealthTools>();
+
+        if (rohlikClient != null)
+            mcpBuilder.WithTools<Recall.Server.Rohlik.RohlikTools>();
     });
 
     await builder.Build().RunAsync();

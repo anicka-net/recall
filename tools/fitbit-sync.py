@@ -35,6 +35,82 @@ from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, processor
 from cycle import build_cycle_summary, ensure_table as ensure_cycle_table
 
 
+# ── Weather (Open-Meteo) ──────────────────────────────────────
+
+WMO_CODES = {
+    0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
+    45: "fog", 48: "freezing fog",
+    51: "light drizzle", 53: "drizzle", 55: "heavy drizzle",
+    56: "freezing drizzle", 57: "heavy freezing drizzle",
+    61: "light rain", 63: "rain", 65: "heavy rain",
+    66: "freezing rain", 67: "heavy freezing rain",
+    71: "light snow", 73: "snow", 75: "heavy snow",
+    77: "snow grains",
+    80: "rain showers", 81: "moderate showers", 82: "heavy showers",
+    85: "snow showers", 86: "heavy snow showers",
+    95: "thunderstorm", 96: "thunderstorm + hail", 99: "thunderstorm + heavy hail",
+}
+
+
+def fetch_weather(date: str, lat: float = 50.08, lon: float = 14.42) -> dict | None:
+    """Fetch weather data from Open-Meteo for migraine-relevant tracking."""
+    from datetime import date as date_type
+    d = date_type.fromisoformat(date)
+    today = date_type.today()
+
+    if (today - d).days <= 10:
+        base_url = "https://api.open-meteo.com/v1/forecast"
+    else:
+        base_url = "https://archive-api.open-meteo.com/v1/archive"
+
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": date,
+        "end_date": date,
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
+        "hourly": "surface_pressure,relative_humidity_2m",
+        "timezone": "Europe/Prague",
+    }
+
+    try:
+        resp = requests.get(base_url, params=params, timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except Exception:
+        return None
+
+    result = {}
+
+    daily = data.get("daily", {})
+    if daily:
+        result["temp_max"] = daily.get("temperature_2m_max", [None])[0]
+        result["temp_min"] = daily.get("temperature_2m_min", [None])[0]
+        result["precipitation_mm"] = daily.get("precipitation_sum", [None])[0]
+        result["weather_code"] = daily.get("weather_code", [None])[0]
+
+    hourly = data.get("hourly", {})
+    pressures = hourly.get("surface_pressure", [])
+    humidity = hourly.get("relative_humidity_2m", [])
+
+    if pressures:
+        valid = [p for p in pressures if p is not None]
+        if valid:
+            result["pressure_avg"] = round(sum(valid) / len(valid), 1)
+            result["pressure_min"] = round(min(valid), 1)
+            result["pressure_max"] = round(max(valid), 1)
+            result["pressure_morning"] = round(valid[0], 1)
+            result["pressure_evening"] = round(valid[-1], 1)
+
+    if humidity:
+        valid = [h for h in humidity if h is not None]
+        if valid:
+            result["humidity_avg"] = round(sum(valid) / len(valid))
+
+    return result if result else None
+
+
 # ── Paths ──────────────────────────────────────────────────────
 
 RECALL_DIR = Path.home() / ".recall"
@@ -392,6 +468,7 @@ def build_summary(
     spo2: dict | None,
     baseline_hr: int,
     cycle_summary: str | None = None,
+    weather: dict | None = None,
 ) -> str:
     """Build structured health summary for a given day."""
     dt = datetime.strptime(date, "%Y-%m-%d")
@@ -499,6 +576,29 @@ def build_summary(
             parts.append(f"max {spo2['max']}%")
         lines.append(f"SpO2: {', '.join(parts)}")
 
+    if weather:
+        lines.append("")
+        parts = []
+        if weather.get("temp_min") is not None and weather.get("temp_max") is not None:
+            parts.append(f"{weather['temp_min']:.0f}→{weather['temp_max']:.0f}°C")
+        if weather.get("pressure_avg") is not None:
+            p = f"pressure {weather['pressure_avg']:.0f} hPa"
+            morning = weather.get("pressure_morning")
+            evening = weather.get("pressure_evening")
+            if morning is not None and evening is not None:
+                ch = evening - morning
+                arrow = "↑" if ch > 0.5 else "↓" if ch < -0.5 else "→"
+                p += f" ({arrow}{abs(ch):.0f} over day)"
+            parts.append(p)
+        if weather.get("humidity_avg") is not None:
+            parts.append(f"humidity {weather['humidity_avg']}%")
+        desc = WMO_CODES.get(weather.get("weather_code"), None)
+        if desc:
+            parts.append(desc)
+        if weather.get("precipitation_mm") and weather["precipitation_mm"] > 0:
+            parts.append(f"{weather['precipitation_mm']:.1f}mm precip")
+        lines.append(f"Weather: {', '.join(parts)}")
+
     if cycle_summary:
         lines.append("")
         lines.append(cycle_summary)
@@ -588,6 +688,7 @@ def ensure_table(conn: sqlite3.Connection):
             heart_json TEXT,
             activity_json TEXT,
             spo2_json TEXT,
+            weather_json TEXT,
             embedding BLOB,
             synced_at TEXT NOT NULL
         )
@@ -595,6 +696,11 @@ def ensure_table(conn: sqlite3.Connection):
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_health_date ON health_data(date DESC)
     """)
+    # Add weather_json column to existing tables
+    try:
+        conn.execute("ALTER TABLE health_data ADD COLUMN weather_json TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
 
 
@@ -606,13 +712,14 @@ def write_health_entry(
     heart: dict | None,
     activity: dict | None,
     spo2: dict | None,
+    weather: dict | None,
     embedding: bytes | None,
 ):
     """Insert or replace health data for a date."""
     conn.execute("""
         INSERT OR REPLACE INTO health_data
-            (date, summary, sleep_json, heart_json, activity_json, spo2_json, embedding, synced_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (date, summary, sleep_json, heart_json, activity_json, spo2_json, weather_json, embedding, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         date,
         summary,
@@ -620,6 +727,7 @@ def write_health_entry(
         json.dumps(heart) if heart else None,
         json.dumps(activity) if activity else None,
         json.dumps(spo2) if spo2 else None,
+        json.dumps(weather) if weather else None,
         embedding,
         datetime.now(tz=__import__('datetime').timezone.utc).isoformat(),
     ))
@@ -651,7 +759,15 @@ def sync_day(config: dict, conn: sqlite3.Connection, embedder: EmbeddingService 
     except Exception:
         pass  # cycle data not imported yet, or table missing — silently skip
 
-    summary = build_summary(date, sleep, heart, activity, spo2, baseline_hr, cycle_summary)
+    # Fetch weather data (Open-Meteo, no API key needed)
+    weather = None
+    try:
+        loc = config.get("weather_location", {"lat": 50.08, "lon": 14.42})
+        weather = fetch_weather(date, loc["lat"], loc["lon"])
+    except Exception as e:
+        print(f"(weather failed: {e})", end=" ")
+
+    summary = build_summary(date, sleep, heart, activity, spo2, baseline_hr, cycle_summary, weather)
 
     embedding = None
     if embedder:
@@ -660,7 +776,7 @@ def sync_day(config: dict, conn: sqlite3.Connection, embedder: EmbeddingService 
         except Exception as e:
             print(f"(embedding failed: {e})", end=" ")
 
-    write_health_entry(conn, date, summary, sleep, heart, activity, spo2, embedding)
+    write_health_entry(conn, date, summary, sleep, heart, activity, spo2, weather, embedding)
     print("ok")
 
 

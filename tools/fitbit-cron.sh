@@ -28,14 +28,18 @@ echo "Local sync done."
 
 # 3. Push health_data rows to remote (INSERT OR REPLACE = idempotent)
 sqlite3 "$LOCAL_DB" "
-    SELECT 'INSERT OR REPLACE INTO health_data (date, summary, sleep_json, heart_json, activity_json, spo2_json, embedding, synced_at) VALUES ('
+    SELECT 'INSERT OR REPLACE INTO health_data (date, summary, sleep_json, heart_json, activity_json, spo2_json, weather_json, embedding, synced_at) VALUES ('
         || quote(date) || ',' || quote(summary) || ',' || quote(sleep_json) || ','
         || quote(heart_json) || ',' || quote(activity_json) || ',' || quote(spo2_json) || ','
-        || quote(embedding) || ',' || quote(synced_at) || ');'
+        || quote(weather_json) || ',' || quote(embedding) || ',' || quote(synced_at) || ');'
     FROM health_data;
 " | ssh "$REMOTE" "sqlite3 ~/$REMOTE_DB"
 
 echo "Pushed health_data to remote."
+
+# 3b. Update migraine risk forecast in calendar
+"$VENV" "$SCRIPT_DIR/migraine.py" predict --days 7 --quiet
+echo "Migraine forecast updated."
 
 # 4. Push cycle_starts to remote (entries logged locally)
 if sqlite3 "$LOCAL_DB" "SELECT 1 FROM cycle_starts LIMIT 1" 2>/dev/null; then
