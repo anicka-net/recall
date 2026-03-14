@@ -1,6 +1,6 @@
 # Recall
 
-> **Note:** This is a personal learning project. I'm using it to learn C# and .NET by building something I actually use daily. It works on **Linux only** (the ONNX native library resolver is Linux-specific). PRs welcome but expect rough edges.
+> **Note:** This is a personal learning project. I'm using it to learn C# and .NET by building something I actually use daily. Works on **Linux, macOS, and Windows**. PRs welcome but expect rough edges.
 
 A personal diary MCP server with persistent memory, semantic search, health tracking, and grocery integration.
 

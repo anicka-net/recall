@@ -24,21 +24,22 @@ public class EmbeddingService : IDisposable
     }
 
     /// <summary>
-    /// ONNX Runtime P/Invokes "onnxruntime.dll" but on Linux the file is libonnxruntime.so.
-    /// .NET 10 doesn't auto-resolve this, so we help it along.
+    /// ONNX Runtime P/Invokes "onnxruntime" but the actual library name varies by OS.
+    /// .NET doesn't always auto-resolve this, so we try all platform names.
     /// </summary>
     private static void RegisterOnnxNativeResolver()
     {
         var onnxAsm = typeof(InferenceSession).Assembly;
         NativeLibrary.SetDllImportResolver(onnxAsm, (name, assembly, searchPath) =>
         {
-            // Let the default resolver try first for non-onnxruntime libraries
             if (!name.Contains("onnxruntime"))
                 return IntPtr.Zero;
 
-            // Try the standard name on Linux
-            if (NativeLibrary.TryLoad("libonnxruntime.so", assembly, searchPath, out var handle))
-                return handle;
+            foreach (var candidate in (string[])["libonnxruntime.dylib", "libonnxruntime.so", "onnxruntime.dll"])
+            {
+                if (NativeLibrary.TryLoad(candidate, assembly, searchPath, out var handle))
+                    return handle;
+            }
 
             return IntPtr.Zero;
         });
