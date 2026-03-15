@@ -26,7 +26,8 @@ echo "Pulled cycle_starts from remote."
 "$VENV" "$SYNC" sync --days 2
 echo "Local sync done."
 
-# 3. Push health_data rows to remote (INSERT OR REPLACE = idempotent)
+# 3. Ensure weather_json column exists on remote, then push health_data
+ssh "$REMOTE" "sqlite3 ~/$REMOTE_DB 'ALTER TABLE health_data ADD COLUMN weather_json TEXT'" 2>/dev/null || true
 sqlite3 "$LOCAL_DB" "
     SELECT 'INSERT OR REPLACE INTO health_data (date, summary, sleep_json, heart_json, activity_json, spo2_json, weather_json, embedding, synced_at) VALUES ('
         || quote(date) || ',' || quote(summary) || ',' || quote(sleep_json) || ','
