@@ -180,7 +180,7 @@ public class RohlikTools
         {
             return action switch
             {
-                "history" => FormatJson(await client!.GetOrderHistory(limit)),
+                "history" => FormatOrders(await client!.GetOrderHistory(limit)),
                 "detail" when orderId != null => FormatJson(await client!.GetOrderDetail(orderId)),
                 "detail" => "Provide orderId.",
                 "upcoming" => FormatJson(await client!.GetUpcomingOrders()),
@@ -241,7 +241,7 @@ public class RohlikTools
         {
             return action switch
             {
-                "premium" => FormatJson(await client!.GetPremiumInfo()),
+                "premium" => FormatPremium(await client!.GetPremiumInfo()),
                 "announcements" => FormatJson(await client!.GetAnnouncements()),
                 "bags" => FormatJson(await client!.GetReusableBagsInfo()),
                 "checkout" => FormatJson(await client!.GetCheckoutStatus()),
@@ -369,6 +369,108 @@ public class RohlikTools
     }
 
     // ── Formatting ───────────────────────────────────────────
+
+    private static string FormatOrders(JsonElement orders)
+    {
+        if (orders.ValueKind != JsonValueKind.Array || orders.GetArrayLength() == 0)
+            return "No orders found.";
+
+        var sb = new StringBuilder($"Order history ({orders.GetArrayLength()}):\n\n");
+        foreach (var o in orders.EnumerateArray())
+        {
+            var id = o.TryGetProperty("id", out var oid) ? oid.ToString() : "?";
+            var items = o.TryGetProperty("itemsCount", out var ic) ? ic.GetInt32().ToString() : "?";
+            var total = "?";
+            if (o.TryGetProperty("priceComposition", out var pc)
+                && pc.TryGetProperty("total", out var t)
+                && t.TryGetProperty("amount", out var amt))
+                total = amt.GetDouble().ToString("F2");
+            var time = o.TryGetProperty("orderTime", out var ot) ? ot.GetString()?[..16] : "?";
+            sb.AppendLine($"- #{id}: {items} items, {total} Kč ({time})");
+        }
+        return sb.ToString();
+    }
+
+    private static string FormatPremium(JsonElement data)
+    {
+        var sb = new StringBuilder("Rohlik Xtra membership:\n\n");
+
+        if (data.TryGetProperty("card", out var card))
+        {
+            var masked = card.TryGetProperty("maskedCln", out var m) ? m.GetString() : "?";
+            var exp = card.TryGetProperty("expiration", out var e) ? e.GetString() : "?";
+            sb.AppendLine($"Card: {masked} (exp {exp})");
+        }
+
+        if (data.TryGetProperty("savings", out var savings))
+        {
+            var label = savings.TryGetProperty("title", out var t) ? t.GetString() : "Savings";
+            var totalStr = "?";
+            if (savings.TryGetProperty("total", out var total)
+                && total.TryGetProperty("amount", out var totalAmt))
+            {
+                // amount can be a number or {"amount": N, "currency": "CZK"}
+                totalStr = totalAmt.ValueKind == JsonValueKind.Object
+                    && totalAmt.TryGetProperty("amount", out var inner)
+                    ? inner.GetDouble().ToString("F0")
+                    : totalAmt.GetDouble().ToString("F0");
+            }
+            sb.AppendLine($"{label} {totalStr} Kč");
+
+            if (savings.TryGetProperty("breakdown", out var breakdown))
+            {
+                foreach (var item in breakdown.EnumerateArray())
+                {
+                    var l = item.TryGetProperty("label", out var il) ? il.GetString() : "?";
+                    var a = "?";
+                    if (item.TryGetProperty("amount", out var ia))
+                    {
+                        a = ia.ValueKind == JsonValueKind.Object
+                            && ia.TryGetProperty("amount", out var iaa)
+                            ? iaa.GetDouble().ToString("F0")
+                            : ia.GetDouble().ToString("F0");
+                    }
+                    sb.AppendLine($"  - {l}: {a} Kč");
+                }
+            }
+        }
+
+        if (data.TryGetProperty("premiumLimits", out var limits))
+        {
+            sb.AppendLine();
+            if (limits.TryGetProperty("ordersWithoutPriceLimit", out var owpl)
+                && owpl.TryGetProperty("enabled", out var oe) && oe.GetBoolean())
+            {
+                var rem = owpl.TryGetProperty("remaining", out var r) ? r.GetInt32() : 0;
+                var tot = owpl.TryGetProperty("total", out var tt) ? tt.GetInt32() : 0;
+                sb.AppendLine($"Small orders: {rem}/{tot} remaining");
+            }
+            if (limits.TryGetProperty("freeExpressLimit", out var fel)
+                && fel.TryGetProperty("enabled", out var fe) && fe.GetBoolean())
+            {
+                var rem = fel.TryGetProperty("remaining", out var r) ? r.GetInt32() : 0;
+                var tot = fel.TryGetProperty("total", out var tt) ? tt.GetInt32() : 0;
+                sb.AppendLine($"Free express: {rem}/{tot} remaining");
+            }
+        }
+
+        if (data.TryGetProperty("prices", out var prices))
+        {
+            sb.AppendLine();
+            foreach (var p in prices.EnumerateArray())
+            {
+                var type = p.TryGetProperty("type", out var pt) ? pt.GetString() : "?";
+                if (type == "CHANGE_CARD_PREMIUM") continue;
+                var label = p.TryGetProperty("label", out var pl) ? pl.GetString() : null;
+                var price = p.TryGetProperty("price", out var pp) && pp.TryGetProperty("full", out var pf)
+                    ? pf.GetDouble().ToString("F0") : "?";
+                if (label != null)
+                    sb.AppendLine($"{type}: {price} Kč — {label}");
+            }
+        }
+
+        return sb.ToString();
+    }
 
     private static string FormatSlots(JsonElement data)
     {
