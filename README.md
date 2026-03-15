@@ -55,13 +55,16 @@ Config file: `~/.recall/config.json`
   "promptFile": "~/.recall/prompt.txt",
   "autoContextLimit": 5,
   "searchResultLimit": 10,
+  "tools": ["diary", "health"],
   "rohlikUsername": "user@example.com",
   "rohlikPassword": "password",
   "rohlikBaseUrl": "https://www.rohlik.cz"
 }
 ```
 
-All fields are optional. Defaults work out of the box. Rohlik tools are only registered when credentials are present.
+All fields are optional. Defaults work out of the box.
+
+The `tools` array controls which tool modules are registered. Valid modules: `diary`, `health`, `rohlik`. When omitted or empty, all modules are enabled. Rohlik additionally requires credentials to be present.
 
 ### Data storage
 

@@ -142,11 +142,13 @@ if (httpMode)
         {
             options.ServerInfo = new() { Name = "recall", Version = "1.0.0" };
         })
-        .WithHttpTransport()
-        .WithTools<Recall.Server.Tools.DiaryTools>()
-        .WithTools<Recall.Server.Tools.HealthTools>();
+        .WithHttpTransport();
 
-    if (rohlikClient != null)
+    if (recallConfig.IsToolEnabled("diary"))
+        mcpBuilder.WithTools<Recall.Server.Tools.DiaryTools>();
+    if (recallConfig.IsToolEnabled("health"))
+        mcpBuilder.WithTools<Recall.Server.Tools.HealthTools>();
+    if (rohlikClient != null && recallConfig.IsToolEnabled("rohlik"))
         mcpBuilder.WithTools<Recall.Server.Rohlik.RohlikTools>();
 
     var app = builder.Build();
@@ -249,11 +251,13 @@ else
             {
                 options.ServerInfo = new() { Name = "recall", Version = "1.0.0" };
             })
-            .WithStdioServerTransport()
-            .WithTools<Recall.Server.Tools.DiaryTools>()
-            .WithTools<Recall.Server.Tools.HealthTools>();
+            .WithStdioServerTransport();
 
-        if (rohlikClient != null)
+        if (recallConfig.IsToolEnabled("diary"))
+            mcpBuilder.WithTools<Recall.Server.Tools.DiaryTools>();
+        if (recallConfig.IsToolEnabled("health"))
+            mcpBuilder.WithTools<Recall.Server.Tools.HealthTools>();
+        if (rohlikClient != null && recallConfig.IsToolEnabled("rohlik"))
             mcpBuilder.WithTools<Recall.Server.Rohlik.RohlikTools>();
     });
 

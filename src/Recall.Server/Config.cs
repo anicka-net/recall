@@ -18,9 +18,18 @@ public class RecallConfig
     public List<ScopeEntry> Scopes { get; init; } = [];
     public int TierHotDays { get; init; } = 7;
     public int TierWarmDays { get; init; } = 90;
+    public List<string> Tools { get; init; } = [];
     public string? RohlikUsername { get; init; }
     public string? RohlikPassword { get; init; }
     public string? RohlikBaseUrl { get; init; }
+
+    /// <summary>
+    /// Check if a tool module should be enabled.
+    /// Empty tools list = all enabled (default). Otherwise only listed modules.
+    /// Valid modules: diary, health, rohlik
+    /// </summary>
+    public bool IsToolEnabled(string module) =>
+        Tools.Count == 0 || Tools.Contains(module, StringComparer.OrdinalIgnoreCase);
 
     public static RecallConfig Load()
     {
@@ -77,6 +86,7 @@ public class RecallConfig
             Scopes = file?.Scopes ?? [],
             TierHotDays = file?.TierHotDays ?? 7,
             TierWarmDays = file?.TierWarmDays ?? 90,
+            Tools = file?.Tools ?? [],
             RohlikUsername = file?.RohlikUsername,
             RohlikPassword = file?.RohlikPassword,
             RohlikBaseUrl = file?.RohlikBaseUrl ?? "https://www.rohlik.cz",
@@ -108,6 +118,7 @@ public class ConfigFile
     public List<ScopeEntry>? Scopes { get; set; }
     public int? TierHotDays { get; set; }
     public int? TierWarmDays { get; set; }
+    public List<string>? Tools { get; set; }
     public string? RohlikUsername { get; set; }
     public string? RohlikPassword { get; set; }
     public string? RohlikBaseUrl { get; set; }
