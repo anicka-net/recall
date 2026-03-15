@@ -19,7 +19,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="Fixtures\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Recall.Storage\Recall.Storage.csproj" />
+    <ProjectReference Include="..\Recall.Server\Recall.Server.csproj" />
   </ItemGroup>
 
 </Project>
