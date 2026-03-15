@@ -212,8 +212,8 @@ public class RohlikTools
             return action switch
             {
                 "info" => FormatJson(await client!.GetDeliveryInfo()),
-                "slots" when cartTotal != null => FormatJson(await client!.GetTimeslots(cartTotal.Value)),
-                "slots" => FormatJson(await client!.GetDeliverySlots()),
+                "slots" when cartTotal != null => FormatSlots(await client!.GetTimeslots(cartTotal.Value)),
+                "slots" => FormatSlots(await client!.GetDeliverySlots()),
                 "reserve" when slotId != null => FormatJson(await client!.ReserveTimeslot(slotId.Value, slotType)),
                 "reserve" => "Provide slotId to reserve.",
                 _ => $"Unknown action '{action}'. Use: info, slots, reserve"
@@ -369,6 +369,71 @@ public class RohlikTools
     }
 
     // ── Formatting ───────────────────────────────────────────
+
+    private static string FormatSlots(JsonElement data)
+    {
+        var sb = new StringBuilder();
+
+        // Preselected slots (quick picks: fastest, cheapest, eco)
+        if (data.TryGetProperty("preselectedSlots", out var preselected))
+        {
+            sb.AppendLine("Suggested slots:");
+            foreach (var ps in preselected.EnumerateArray())
+            {
+                var title = ps.TryGetProperty("title", out var t) ? t.GetString() : "?";
+                var subtitle = ps.TryGetProperty("subtitle", out var st) ? st.GetString() : "";
+                if (ps.TryGetProperty("slot", out var slot) && slot.ValueKind != System.Text.Json.JsonValueKind.Null)
+                {
+                    var id = slot.TryGetProperty("slotId", out var sid) ? sid.GetInt32().ToString() : "?";
+                    var price = slot.TryGetProperty("price", out var pr) ? pr.GetDouble().ToString("F0") : "?";
+                    var cap = slot.TryGetProperty("capacity", out var c) ? c.GetString() : "?";
+                    sb.AppendLine($"  {title} {subtitle} — {price} Kč, {cap} [slotId: {id}]");
+                }
+                else
+                {
+                    sb.AppendLine($"  {title} {subtitle}");
+                }
+            }
+            sb.AppendLine();
+        }
+
+        // Detailed 15-min slots per day
+        if (data.TryGetProperty("availabilityDays", out var days))
+        {
+            foreach (var day in days.EnumerateArray())
+            {
+                var date = day.TryGetProperty("date", out var d) ? d.GetString() : "?";
+                var label = day.TryGetProperty("label", out var l) ? l.GetString() : date;
+                sb.AppendLine($"{label} ({date}):");
+
+                if (!day.TryGetProperty("slots", out var slots))
+                {
+                    sb.AppendLine("  (no slots)");
+                    continue;
+                }
+
+                // Slots are keyed by hour: {"13": [...], "14": [...]}
+                foreach (var hourProp in slots.EnumerateObject())
+                {
+                    foreach (var slot in hourProp.Value.EnumerateArray())
+                    {
+                        var tw = slot.TryGetProperty("timeWindow", out var w) ? w.GetString() : "?";
+                        var price = slot.TryGetProperty("price", out var pr) ? pr.GetDouble().ToString("F0") : "?";
+                        var cap = slot.TryGetProperty("capacity", out var c) ? c.GetString() : "?";
+                        var id = slot.TryGetProperty("slotId", out var sid) ? sid.GetInt32().ToString() : "?";
+                        var eco = slot.TryGetProperty("eco", out var e) && e.GetBoolean() ? " ECO" : "";
+                        var premium = slot.TryGetProperty("premium", out var pm) && pm.GetBoolean() ? " PREMIUM" : "";
+                        var status = cap == "RED" ? " (full)" : cap == "ORANGE" ? " (limited)" : "";
+
+                        sb.AppendLine($"  {tw} — {price} Kč{eco}{premium}{status} [slotId: {id}]");
+                    }
+                }
+                sb.AppendLine();
+            }
+        }
+
+        return sb.ToString();
+    }
 
     private static string FormatJson(JsonElement el)
     {
