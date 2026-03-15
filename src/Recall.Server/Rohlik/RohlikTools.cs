@@ -80,10 +80,19 @@ public class RohlikTools
         foreach (var p in products)
         {
             var name = p.TryGetProperty("name", out var n) ? n.GetString() : "?";
-            var price = p.TryGetProperty("price", out var pr)
-                && pr.TryGetProperty("full", out var pf) ? pf.GetDouble().ToString("F2") : "?";
-            var id = p.TryGetProperty("id", out var pid) ? pid.GetInt32().ToString() : "?";
-            sb2.AppendLine($"- {name} — {price} Kč [ID: {id}]");
+            var id = p.TryGetProperty("productId", out var pid) ? pid.GetInt32().ToString() : "?";
+
+            // Card API uses "prices" object (not "price")
+            var priceStr = "?";
+            if (p.TryGetProperty("prices", out var prices))
+            {
+                if (prices.TryGetProperty("salePrice", out var sp) && sp.ValueKind != System.Text.Json.JsonValueKind.Null)
+                    priceStr = $"{sp.GetDouble():F2} (sleva z {prices.GetProperty("originalPrice").GetDouble():F2})";
+                else if (prices.TryGetProperty("originalPrice", out var op))
+                    priceStr = op.GetDouble().ToString("F2");
+            }
+
+            sb2.AppendLine($"- {name} — {priceStr} Kč [ID: {id}]");
         }
         return sb2.ToString();
     }
