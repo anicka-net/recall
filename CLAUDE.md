@@ -41,8 +41,6 @@ scope mismatch in MCP library" is useful.
 - `diary_search` action=list — Browse recent entries chronologically.
 - `diary_day` action=view/plan/summarize — Day-level operations.
 - `diary_time` — Get current date/time/day of week.
-- `health` action=recent/query — Health and fitness data.
-- `health` action=log_migraine/log_period — Track migraines and cycle.
 
 ## 2) Working style
 
