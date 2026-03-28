@@ -194,9 +194,6 @@ public class DiaryDatabase : IDisposable
         vectorMatches ??= SearchLike(query, limit, level, scope, maxTier);
 
         // Merge: tag matches first, then vector results (deduplicated)
-        if (tagMatches.Count == 0)
-            return vectorMatches;
-
         var seen = new HashSet<int>(tagMatches.Select(e => e.Id));
         var merged = new List<DiaryEntry>(tagMatches);
         foreach (var entry in vectorMatches)
@@ -204,7 +201,74 @@ public class DiaryDatabase : IDisposable
             if (seen.Add(entry.Id))
                 merged.Add(entry);
         }
-        return merged.Take(limit).ToList();
+
+        var results = merged.Take(limit).ToList();
+
+        // Involuntary recall (Berntsen 2009): 5% chance a random cold-tier
+        // entry surfaces, creating unexpected connections across time
+        if (Random.Shared.NextDouble() < 0.05)
+        {
+            var ghost = GetRandomEntry(level, scope, minTier: 2);
+            if (ghost != null && seen.Add(ghost.Id))
+                results.Add(ghost);
+        }
+
+        // Track retrievals for RIF scoring
+        BumpRetrievalCounts(results.Select(e => e.Id));
+
+        return results;
+    }
+
+    /// <summary>
+    /// Involuntary recall: fetch a random entry from cold tier.
+    /// </summary>
+    private DiaryEntry? GetRandomEntry(AccessLevel level, string? scope, int minTier = 2)
+    {
+        var (filter, bind) = AccessFilter(level, scope);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT id, created_at, content, tags, conversation_id
+            FROM entries
+            WHERE tier >= @minTier{filter}
+            ORDER BY RANDOM()
+            LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("@minTier", minTier);
+        bind?.Invoke(cmd);
+        var entries = ReadEntries(cmd);
+        return entries.Count > 0 ? entries[0] : null;
+    }
+
+    /// <summary>
+    /// RIF: increment retrieval_count for retrieved entries.
+    /// Creates the column on first use (safe for existing DBs).
+    /// </summary>
+    private void BumpRetrievalCounts(IEnumerable<int> ids)
+    {
+        var idList = ids.ToList();
+        if (idList.Count == 0) return;
+
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            var idParams = string.Join(",", idList.Select((_, i) => $"@id{i}"));
+            cmd.CommandText = $"UPDATE entries SET retrieval_count = COALESCE(retrieval_count, 0) + 1 WHERE id IN ({idParams})";
+            for (int i = 0; i < idList.Count; i++)
+                cmd.Parameters.AddWithValue($"@id{i}", idList[i]);
+            cmd.ExecuteNonQuery();
+        }
+        catch
+        {
+            // Column doesn't exist yet — add it
+            try
+            {
+                using var alter = _conn.CreateCommand();
+                alter.CommandText = "ALTER TABLE entries ADD COLUMN retrieval_count INTEGER DEFAULT 0";
+                alter.ExecuteNonQuery();
+                BumpRetrievalCounts(idList); // retry
+            }
+            catch { /* column already exists from concurrent add, ignore */ }
+        }
     }
 
     private List<DiaryEntry> SearchTags(string query, int limit, AccessLevel level,
@@ -242,9 +306,12 @@ public class DiaryDatabase : IDisposable
         var queryEmbedding = _embeddings!.Embed(query);
         var (filter, bind) = AccessFilter(level, scope);
 
+        // Include retrieval_count for RIF penalty (may not exist yet)
+        var hasRifColumn = true;
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = $"""
-            SELECT id, created_at, content, tags, conversation_id, embedding
+            SELECT id, created_at, content, tags, conversation_id, embedding,
+                   COALESCE(retrieval_count, 0) as rc
             FROM entries
             WHERE embedding IS NOT NULL AND tier <= @maxTier{filter}
             """;
@@ -252,20 +319,59 @@ public class DiaryDatabase : IDisposable
         bind?.Invoke(cmd);
 
         var scored = new List<(DiaryEntry Entry, float Score)>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
+        try
         {
-            var entry = new DiaryEntry(
-                Id: reader.GetInt32(0),
-                CreatedAt: DateTimeOffset.Parse(reader.GetString(1)),
-                Content: reader.GetString(2),
-                Tags: reader.IsDBNull(3) ? null : reader.GetString(3),
-                ConversationId: reader.IsDBNull(4) ? null : reader.GetString(4));
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var entry = new DiaryEntry(
+                    Id: reader.GetInt32(0),
+                    CreatedAt: DateTimeOffset.Parse(reader.GetString(1)),
+                    Content: reader.GetString(2),
+                    Tags: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    ConversationId: reader.IsDBNull(4) ? null : reader.GetString(4));
 
-            var blob = (byte[])reader.GetValue(5);
-            var embedding = EmbeddingService.Deserialize(blob);
-            var score = EmbeddingService.Similarity(queryEmbedding, embedding);
-            scored.Add((entry, score));
+                var blob = (byte[])reader.GetValue(5);
+                var embedding = EmbeddingService.Deserialize(blob);
+                var score = EmbeddingService.Similarity(queryEmbedding, embedding);
+
+                // RIF: small penalty for frequently retrieved entries
+                // Each retrieval reduces score by ~1%, capped at 15% reduction
+                var retrievalCount = reader.GetInt32(6);
+                var rifPenalty = Math.Min(retrievalCount * 0.01f, 0.15f);
+                score *= (1f - rifPenalty);
+
+                scored.Add((entry, score));
+            }
+        }
+        catch
+        {
+            // retrieval_count column doesn't exist — fall back without RIF
+            hasRifColumn = false;
+        }
+
+        if (!hasRifColumn)
+        {
+            cmd.CommandText = $"""
+                SELECT id, created_at, content, tags, conversation_id, embedding
+                FROM entries
+                WHERE embedding IS NOT NULL AND tier <= @maxTier{filter}
+                """;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var entry = new DiaryEntry(
+                    Id: reader.GetInt32(0),
+                    CreatedAt: DateTimeOffset.Parse(reader.GetString(1)),
+                    Content: reader.GetString(2),
+                    Tags: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    ConversationId: reader.IsDBNull(4) ? null : reader.GetString(4));
+
+                var blob = (byte[])reader.GetValue(5);
+                var embedding = EmbeddingService.Deserialize(blob);
+                var score = EmbeddingService.Similarity(queryEmbedding, embedding);
+                scored.Add((entry, score));
+            }
         }
 
         return scored
