@@ -36,9 +36,11 @@ public class DiaryTools
         if (access == AccessLevel.None)
             return "Access denied. Provide a valid secret.";
 
+        var memory = config.GetMemoryFeatures(access == AccessLevel.Scoped ? userScope : null);
+
         return action switch
         {
-            "write" => DoWrite(db, access, userScope, content, tags, conversationId, restricted),
+            "write" => DoWrite(db, access, userScope, content, tags, conversationId, restricted, memory),
             "update" when id != null => DoUpdate(db, access, userScope, id.Value, content ?? "", tags),
             "update" => "Provide id to update.",
             "get" when id != null => DoGet(db, access, userScope, id.Value),
@@ -50,7 +52,8 @@ public class DiaryTools
     }
 
     private static string DoWrite(DiaryDatabase db, AccessLevel access, string? userScope,
-        string? content, string? tags, string? conversationId, bool restricted)
+        string? content, string? tags, string? conversationId, bool restricted,
+        MemoryFeatures memory)
     {
         if (string.IsNullOrWhiteSpace(content))
             return "Provide content to write.";
@@ -67,10 +70,20 @@ public class DiaryTools
         if (access != AccessLevel.Guardian)
             restricted = false;
 
+        // Novelty check (Ranganath & Rainer 2003): warn if very similar to recent entry
+        string noveltyNote = "";
+        var noveltyThreshold = memory.NoveltyThreshold ?? 0.0;
+        if (noveltyThreshold > 0)
+        {
+            var match = db.CheckNovelty(content, noveltyThreshold);
+            if (match != null)
+                noveltyNote = $" [similar to #{match.Value.Id} ({match.Value.Score:P0})]";
+        }
+
         string? scope = access == AccessLevel.Scoped ? userScope : null;
         var id = db.WriteEntry(content, tags, conversationId, restricted: restricted, scope: scope);
         var scopeNote = scope != null ? $" [scope: {scope}]" : "";
-        return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}{(restricted ? " [restricted]" : "")}{scopeNote}.";
+        return $"Entry #{id} saved at {DateTimeOffset.Now:yyyy-MM-dd HH:mm}{(restricted ? " [restricted]" : "")}{scopeNote}{noveltyNote}.";
     }
 
     private static string DoUpdate(DiaryDatabase db, AccessLevel access, string? userScope,
@@ -157,7 +170,7 @@ public class DiaryTools
         var conversationId = Guid.NewGuid().ToString("N")[..12];
         var limit = config.AutoContextLimit;
 
-        db.RunAging(config.TierHotDays, config.TierWarmDays);
+        db.RunAging(config.TierHotDays, config.TierWarmDays, memory.TemporalGist ?? true);
 
         string foundationalSection = "";
         if (access == AccessLevel.Guardian)

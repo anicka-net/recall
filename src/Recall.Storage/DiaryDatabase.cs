@@ -11,6 +11,12 @@ public class MemoryFeatures
     public double? InvoluntaryRecallRate { get; set; }
     /// <summary>RIF: penalize frequently retrieved entries in scoring</summary>
     public bool? RetrievalInducedForgetting { get; set; }
+    /// <summary>Reconsolidation drift: auto-tag entries with query terms they're retrieved for</summary>
+    public bool? ReconsolidationDrift { get; set; }
+    /// <summary>Temporal gist: compress cold entries to first N words + tags</summary>
+    public bool? TemporalGist { get; set; }
+    /// <summary>Novelty encoding: flag near-duplicate entries on write (cosine threshold 0.0-1.0, 0=off)</summary>
+    public double? NoveltyThreshold { get; set; }
 
     /// <summary>Resolve effective value with fallback to defaults.</summary>
     public static MemoryFeatures Resolve(MemoryFeatures? scopeOverride, MemoryFeatures? global)
@@ -21,6 +27,12 @@ public class MemoryFeatures
                 ?? global?.InvoluntaryRecallRate ?? 0.05,
             RetrievalInducedForgetting = scopeOverride?.RetrievalInducedForgetting
                 ?? global?.RetrievalInducedForgetting ?? true,
+            ReconsolidationDrift = scopeOverride?.ReconsolidationDrift
+                ?? global?.ReconsolidationDrift ?? true,
+            TemporalGist = scopeOverride?.TemporalGist
+                ?? global?.TemporalGist ?? true,
+            NoveltyThreshold = scopeOverride?.NoveltyThreshold
+                ?? global?.NoveltyThreshold ?? 0.9,
         };
     }
 }
@@ -163,6 +175,45 @@ public class DiaryDatabase : IDisposable
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
+    /// <summary>
+    /// Novelty check (Ranganath & Rainer 2003): compare new content against
+    /// recent entries via embedding similarity. Returns the most similar entry
+    /// ID and score if above threshold, or null if novel enough.
+    /// </summary>
+    public (int Id, float Score)? CheckNovelty(string content, double threshold = 0.9)
+    {
+        if (_embeddings is not { IsAvailable: true } || threshold <= 0)
+            return null;
+
+        float[] newEmb;
+        try { newEmb = _embeddings.Embed(content); }
+        catch { return null; }
+
+        // Compare against last 48 hours of entries
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, embedding FROM entries
+            WHERE embedding IS NOT NULL
+              AND created_at > datetime('now', '-2 days')
+            ORDER BY created_at DESC
+            LIMIT 50
+            """;
+
+        (int Id, float Score)? best = null;
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var id = reader.GetInt32(0);
+            var blob = (byte[])reader.GetValue(1);
+            var emb = EmbeddingService.Deserialize(blob);
+            var sim = EmbeddingService.Similarity(newEmb, emb);
+            if (sim >= threshold && (best == null || sim > best.Value.Score))
+                best = (id, sim);
+        }
+
+        return best;
+    }
+
     public bool UpdateEntry(int id, string content, string? tags = null)
     {
         // Check if entry exists
@@ -242,6 +293,11 @@ public class DiaryDatabase : IDisposable
         if (features.RetrievalInducedForgetting ?? true)
             BumpRetrievalCounts(results.Select(e => e.Id));
 
+        // Reconsolidation drift (Nader 2000): entries "remember" what they
+        // were retrieved for — top 3 results get query terms added as tags
+        if ((features.ReconsolidationDrift ?? true) && !string.IsNullOrWhiteSpace(query))
+            DriftTags(results.Take(3).Select(e => e.Id), query);
+
         return results;
     }
 
@@ -294,6 +350,52 @@ public class DiaryDatabase : IDisposable
                 BumpRetrievalCounts(idList); // retry
             }
             catch { /* column already exists from concurrent add, ignore */ }
+        }
+    }
+
+    /// <summary>
+    /// Reconsolidation drift: append query words to entry tags (top 3 results only).
+    /// Only adds words that are ≥4 chars, not already in tags, max 20 drift tags total.
+    /// </summary>
+    private void DriftTags(IEnumerable<int> ids, string query)
+    {
+        var words = query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(w => w.Length >= 4)
+            .Select(w => w.ToLowerInvariant())
+            .Distinct()
+            .ToList();
+        if (words.Count == 0) return;
+
+        foreach (var id in ids)
+        {
+            try
+            {
+                using var read = _conn.CreateCommand();
+                read.CommandText = "SELECT tags FROM entries WHERE id = @id";
+                read.Parameters.AddWithValue("@id", id);
+                var existing = read.ExecuteScalar() as string ?? "";
+
+                var existingTags = existing.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(t => t.ToLowerInvariant())
+                    .ToHashSet();
+
+                // Cap drift tags — don't let tags grow unboundedly
+                if (existingTags.Count >= 20) continue;
+
+                var newTags = words.Where(w => !existingTags.Contains(w)).ToList();
+                if (newTags.Count == 0) continue;
+
+                var updated = string.IsNullOrEmpty(existing)
+                    ? string.Join(",", newTags)
+                    : existing + "," + string.Join(",", newTags);
+
+                using var write = _conn.CreateCommand();
+                write.CommandText = "UPDATE entries SET tags = @tags WHERE id = @id";
+                write.Parameters.AddWithValue("@tags", updated);
+                write.Parameters.AddWithValue("@id", id);
+                write.ExecuteNonQuery();
+            }
+            catch { /* best effort */ }
         }
     }
 
@@ -462,8 +564,27 @@ public class DiaryDatabase : IDisposable
 
     // ── Tiered Aging ────────────────────────────────────────────
 
-    public void RunAging(int hotDays, int warmDays)
+    public void RunAging(int hotDays, int warmDays, bool temporalGist = true)
     {
+        // Identify entries about to go cold (for gist extraction)
+        List<(int Id, string Content, string? Tags)>? goingCold = null;
+        if (temporalGist)
+        {
+            using var find = _conn.CreateCommand();
+            find.CommandText = """
+                SELECT id, content, tags FROM entries
+                WHERE tier = 1 AND pinned = 0 AND foundational = 0
+                  AND created_at < datetime('now', '-' || @warmDays || ' days')
+                  AND length(content) > 200
+                """;
+            find.Parameters.AddWithValue("@warmDays", warmDays);
+            goingCold = new();
+            using var reader = find.ExecuteReader();
+            while (reader.Read())
+                goingCold.Add((reader.GetInt32(0), reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)));
+        }
+
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             UPDATE entries SET tier = 1 WHERE tier = 0 AND pinned = 0 AND foundational = 0
@@ -474,6 +595,42 @@ public class DiaryDatabase : IDisposable
         cmd.Parameters.AddWithValue("@hotDays", hotDays);
         cmd.Parameters.AddWithValue("@warmDays", warmDays);
         cmd.ExecuteNonQuery();
+
+        // Temporal gist (Reyna & Brainerd 1995): compress newly cold entries
+        // to first ~15 words + "[gist]" marker, preserving tags and embedding
+        if (goingCold is { Count: > 0 })
+        {
+            foreach (var (id, content, tags) in goingCold)
+            {
+                // Extract first meaningful line (skip date headers)
+                var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                var gistLine = "";
+                foreach (var line in lines)
+                {
+                    var trimmed = line.TrimStart('#', '*', ' ', '-');
+                    if (trimmed.StartsWith("Date:") || trimmed.StartsWith("**Date:"))
+                        continue;
+                    if (trimmed.Length > 10)
+                    {
+                        // Take first ~15 words
+                        var words = trimmed.Split(' ');
+                        gistLine = string.Join(' ', words.Take(15));
+                        if (words.Length > 15) gistLine += "...";
+                        break;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(gistLine)) continue;
+
+                var gist = $"[gist] {gistLine}";
+
+                using var update = _conn.CreateCommand();
+                update.CommandText = "UPDATE entries SET content = @content WHERE id = @id";
+                update.Parameters.AddWithValue("@content", gist);
+                update.Parameters.AddWithValue("@id", id);
+                update.ExecuteNonQuery();
+            }
+        }
     }
 
     public List<DiaryEntry> GetFoundational()
