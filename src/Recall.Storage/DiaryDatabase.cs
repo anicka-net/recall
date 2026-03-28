@@ -5,10 +5,31 @@ namespace Recall.Storage;
 
 public enum AccessLevel { None, Scoped, Coding, Guardian }
 
+public class MemoryFeatures
+{
+    /// <summary>Involuntary recall: chance a random cold entry surfaces (0.0-1.0, default 0.05)</summary>
+    public double? InvoluntaryRecallRate { get; set; }
+    /// <summary>RIF: penalize frequently retrieved entries in scoring</summary>
+    public bool? RetrievalInducedForgetting { get; set; }
+
+    /// <summary>Resolve effective value with fallback to defaults.</summary>
+    public static MemoryFeatures Resolve(MemoryFeatures? scopeOverride, MemoryFeatures? global)
+    {
+        return new MemoryFeatures
+        {
+            InvoluntaryRecallRate = scopeOverride?.InvoluntaryRecallRate
+                ?? global?.InvoluntaryRecallRate ?? 0.05,
+            RetrievalInducedForgetting = scopeOverride?.RetrievalInducedForgetting
+                ?? global?.RetrievalInducedForgetting ?? true,
+        };
+    }
+}
+
 public class ScopeEntry
 {
     public string Name { get; set; } = "";
     public string SecretHash { get; set; } = "";
+    public MemoryFeatures? Memory { get; set; }
 }
 
 public record DiaryEntry(
@@ -175,10 +196,13 @@ public class DiaryDatabase : IDisposable
     }
 
     public List<DiaryEntry> Search(string query, int limit, AccessLevel level, string? scope,
-        int maxTier = 2)
+        int maxTier = 2, MemoryFeatures? memory = null)
     {
         if (string.IsNullOrWhiteSpace(query))
             return GetRecent(limit, level, scope, maxTier);
+
+        var features = memory ?? new MemoryFeatures
+            { InvoluntaryRecallRate = 0.05, RetrievalInducedForgetting = true };
 
         // Tag matches get priority — exact metadata hits should always surface
         var tagMatches = SearchTags(query, limit, level, scope, maxTier);
@@ -187,7 +211,8 @@ public class DiaryDatabase : IDisposable
         List<DiaryEntry>? vectorMatches = null;
         if (_embeddings is { IsAvailable: true })
         {
-            try { vectorMatches = VectorSearch(query, limit, level, scope, maxTier); }
+            try { vectorMatches = VectorSearch(query, limit, level, scope, maxTier,
+                      features.RetrievalInducedForgetting ?? true); }
             catch { /* fall through to LIKE */ }
         }
 
@@ -204,17 +229,18 @@ public class DiaryDatabase : IDisposable
 
         var results = merged.Take(limit).ToList();
 
-        // Involuntary recall (Berntsen 2009): 5% chance a random cold-tier
-        // entry surfaces, creating unexpected connections across time
-        if (Random.Shared.NextDouble() < 0.05)
+        // Involuntary recall (Berntsen 2009): random cold-tier entry surfaces
+        var irRate = features.InvoluntaryRecallRate ?? 0.0;
+        if (irRate > 0 && Random.Shared.NextDouble() < irRate)
         {
             var ghost = GetRandomEntry(level, scope, minTier: 2);
             if (ghost != null && seen.Add(ghost.Id))
                 results.Add(ghost);
         }
 
-        // Track retrievals for RIF scoring
-        BumpRetrievalCounts(results.Select(e => e.Id));
+        // Track retrievals for RIF scoring (only if RIF is enabled)
+        if (features.RetrievalInducedForgetting ?? true)
+            BumpRetrievalCounts(results.Select(e => e.Id));
 
         return results;
     }
@@ -301,20 +327,32 @@ public class DiaryDatabase : IDisposable
     }
 
     private List<DiaryEntry> VectorSearch(string query, int limit, AccessLevel level,
-        string? scope, int maxTier = 2)
+        string? scope, int maxTier = 2, bool applyRif = true)
     {
         var queryEmbedding = _embeddings!.Embed(query);
         var (filter, bind) = AccessFilter(level, scope);
 
-        // Include retrieval_count for RIF penalty (may not exist yet)
-        var hasRifColumn = true;
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = $"""
-            SELECT id, created_at, content, tags, conversation_id, embedding,
-                   COALESCE(retrieval_count, 0) as rc
-            FROM entries
-            WHERE embedding IS NOT NULL AND tier <= @maxTier{filter}
-            """;
+
+        // Try with retrieval_count for RIF, fall back without
+        var useRif = applyRif;
+        if (useRif)
+        {
+            cmd.CommandText = $"""
+                SELECT id, created_at, content, tags, conversation_id, embedding,
+                       COALESCE(retrieval_count, 0) as rc
+                FROM entries
+                WHERE embedding IS NOT NULL AND tier <= @maxTier{filter}
+                """;
+        }
+        else
+        {
+            cmd.CommandText = $"""
+                SELECT id, created_at, content, tags, conversation_id, embedding
+                FROM entries
+                WHERE embedding IS NOT NULL AND tier <= @maxTier{filter}
+                """;
+        }
         cmd.Parameters.AddWithValue("@maxTier", maxTier);
         bind?.Invoke(cmd);
 
@@ -335,43 +373,22 @@ public class DiaryDatabase : IDisposable
                 var embedding = EmbeddingService.Deserialize(blob);
                 var score = EmbeddingService.Similarity(queryEmbedding, embedding);
 
-                // RIF: small penalty for frequently retrieved entries
-                // Each retrieval reduces score by ~1%, capped at 15% reduction
-                var retrievalCount = reader.GetInt32(6);
-                var rifPenalty = Math.Min(retrievalCount * 0.01f, 0.15f);
-                score *= (1f - rifPenalty);
+                if (useRif)
+                {
+                    var retrievalCount = reader.GetInt32(6);
+                    var rifPenalty = Math.Min(retrievalCount * 0.01f, 0.15f);
+                    score *= (1f - rifPenalty);
+                }
 
                 scored.Add((entry, score));
             }
         }
         catch
         {
-            // retrieval_count column doesn't exist — fall back without RIF
-            hasRifColumn = false;
-        }
-
-        if (!hasRifColumn)
-        {
-            cmd.CommandText = $"""
-                SELECT id, created_at, content, tags, conversation_id, embedding
-                FROM entries
-                WHERE embedding IS NOT NULL AND tier <= @maxTier{filter}
-                """;
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
-            {
-                var entry = new DiaryEntry(
-                    Id: reader.GetInt32(0),
-                    CreatedAt: DateTimeOffset.Parse(reader.GetString(1)),
-                    Content: reader.GetString(2),
-                    Tags: reader.IsDBNull(3) ? null : reader.GetString(3),
-                    ConversationId: reader.IsDBNull(4) ? null : reader.GetString(4));
-
-                var blob = (byte[])reader.GetValue(5);
-                var embedding = EmbeddingService.Deserialize(blob);
-                var score = EmbeddingService.Similarity(queryEmbedding, embedding);
-                scored.Add((entry, score));
-            }
+            // retrieval_count column doesn't exist — retry without RIF
+            if (useRif)
+                return VectorSearch(query, limit, level, scope, maxTier, false);
+            throw;
         }
 
         return scored

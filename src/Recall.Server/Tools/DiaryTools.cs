@@ -139,10 +139,12 @@ public class DiaryTools
 
         var scope = access == AccessLevel.Scoped ? userScope : null;
 
+        var memory = config.GetMemoryFeatures(scope);
+
         return action switch
         {
-            "context" => DoContext(db, config, access, scope, query ?? "general"),
-            "query" when query != null => DoQuery(db, config, access, scope, query, limit),
+            "context" => DoContext(db, config, access, scope, query ?? "general", memory),
+            "query" when query != null => DoQuery(db, config, access, scope, query, limit, memory),
             "query" => "Provide query to search.",
             "list" => DoList(db, access, scope, limit > 0 ? limit : 10),
             _ => $"Unknown action '{action}'. Use: context, query, list"
@@ -150,7 +152,7 @@ public class DiaryTools
     }
 
     private static string DoContext(DiaryDatabase db, RecallConfig config,
-        AccessLevel access, string? scope, string topic)
+        AccessLevel access, string? scope, string topic, MemoryFeatures memory)
     {
         var conversationId = Guid.NewGuid().ToString("N")[..12];
         var limit = config.AutoContextLimit;
@@ -166,7 +168,7 @@ public class DiaryTools
         }
 
         var recent = db.GetRecent(3, access, scope, maxTier: 0);
-        var relevant = db.Search(topic, limit, access, scope, maxTier: 1);
+        var relevant = db.Search(topic, limit, access, scope, maxTier: 1, memory: memory);
 
         var seen = new HashSet<int>();
         var merged = new List<DiaryEntry>();
@@ -193,10 +195,10 @@ public class DiaryTools
     }
 
     private static string DoQuery(DiaryDatabase db, RecallConfig config,
-        AccessLevel access, string? scope, string query, int limit)
+        AccessLevel access, string? scope, string query, int limit, MemoryFeatures memory)
     {
         var effectiveLimit = limit > 0 ? limit : config.SearchResultLimit;
-        var results = db.Search(query, effectiveLimit, access, scope, maxTier: 2);
+        var results = db.Search(query, effectiveLimit, access, scope, maxTier: 2, memory: memory);
         if (results.Count == 0)
             return "No entries found matching your query.";
         return FormatEntries(results);

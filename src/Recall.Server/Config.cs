@@ -19,9 +19,26 @@ public class RecallConfig
     public int TierHotDays { get; init; } = 7;
     public int TierWarmDays { get; init; } = 90;
     public List<string> Tools { get; init; } = [];
+    public MemoryFeatures Memory { get; init; } = new();
     public string? RohlikUsername { get; init; }
     public string? RohlikPassword { get; init; }
     public string? RohlikBaseUrl { get; init; }
+
+    /// <summary>
+    /// Resolve effective memory features for a scope (or guardian/coding).
+    /// Scope overrides take precedence over global defaults.
+    /// </summary>
+    public MemoryFeatures GetMemoryFeatures(string? scopeName)
+    {
+        MemoryFeatures? scopeOverride = null;
+        if (scopeName != null)
+        {
+            var scope = Scopes.FirstOrDefault(s =>
+                string.Equals(s.Name, scopeName, StringComparison.OrdinalIgnoreCase));
+            scopeOverride = scope?.Memory;
+        }
+        return MemoryFeatures.Resolve(scopeOverride, Memory);
+    }
 
     /// <summary>
     /// Check if a tool module should be enabled.
@@ -87,6 +104,7 @@ public class RecallConfig
             TierHotDays = file?.TierHotDays ?? 7,
             TierWarmDays = file?.TierWarmDays ?? 90,
             Tools = file?.Tools ?? [],
+            Memory = file?.Memory ?? new MemoryFeatures(),
             RohlikUsername = file?.RohlikUsername,
             RohlikPassword = file?.RohlikPassword,
             RohlikBaseUrl = file?.RohlikBaseUrl ?? "https://www.rohlik.cz",
@@ -119,6 +137,7 @@ public class ConfigFile
     public int? TierHotDays { get; set; }
     public int? TierWarmDays { get; set; }
     public List<string>? Tools { get; set; }
+    public MemoryFeatures? Memory { get; set; }
     public string? RohlikUsername { get; set; }
     public string? RohlikPassword { get; set; }
     public string? RohlikBaseUrl { get; set; }
