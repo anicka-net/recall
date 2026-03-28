@@ -72,9 +72,7 @@ public class RecallConfig
         var systemPrompt = file?.SystemPrompt ?? "";
         if (!string.IsNullOrEmpty(file?.PromptFile))
         {
-            var promptPath = file.PromptFile.StartsWith('~')
-                ? Path.Combine(home, file.PromptFile[2..])
-                : file.PromptFile;
+            var promptPath = ExpandHomePath(file.PromptFile, home);
             if (File.Exists(promptPath))
             {
                 try { systemPrompt = File.ReadAllText(promptPath).Trim(); }
@@ -82,11 +80,13 @@ public class RecallConfig
             }
         }
 
-        var dbPath = file?.DatabasePath
-            ?? Path.Combine(configDir, "recall.db");
+        var dbPath = file?.DatabasePath is string configuredDbPath
+            ? ExpandHomePath(configuredDbPath, home)
+            : Path.Combine(configDir, "recall.db");
 
-        var modelPath = file?.ModelPath
-            ?? Path.Combine(configDir, "models", "all-MiniLM-L6-v2");
+        var modelPath = file?.ModelPath is string configuredModelPath
+            ? ExpandHomePath(configuredModelPath, home)
+            : Path.Combine(configDir, "models", "all-MiniLM-L6-v2");
 
         return new RecallConfig
         {
@@ -109,6 +109,18 @@ public class RecallConfig
             RohlikPassword = file?.RohlikPassword,
             RohlikBaseUrl = file?.RohlikBaseUrl ?? "https://www.rohlik.cz",
         };
+    }
+
+    private static string ExpandHomePath(string path, string home)
+    {
+        if (string.IsNullOrEmpty(path) || path[0] != '~')
+            return path;
+
+        if (path.Length == 1)
+            return home;
+
+        var remainder = path[1..].TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return Path.Combine(home, remainder);
     }
 }
 

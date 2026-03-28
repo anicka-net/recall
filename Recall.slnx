@@ -3,4 +3,7 @@
     <Project Path="src/Recall.Server/Recall.Server.csproj" />
     <Project Path="src/Recall.Storage/Recall.Storage.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Recall.Tests/Recall.Tests.csproj" />
+  </Folder>
 </Solution>

@@ -95,15 +95,9 @@ public static class OAuthEndpoints
             if (codeChallengeMethod != "S256")
                 return Results.BadRequest(new { error = "invalid_request", error_description = "Only S256 code_challenge_method supported" });
 
-            // Verify client exists
-            var client = db.GetOAuthClient(clientId);
-            if (client is null)
-                return Results.BadRequest(new { error = "invalid_client" });
-
-            // Verify redirect_uri is registered
-            var registeredUris = JsonSerializer.Deserialize<string[]>(client.RedirectUrisJson) ?? [];
-            if (!registeredUris.Contains(redirectUri))
-                return Results.BadRequest(new { error = "invalid_redirect_uri" });
+            var validationError = ValidateClientRedirect(db, clientId, redirectUri);
+            if (validationError is not null)
+                return validationError;
 
             // Check if passphrase is configured
             if (string.IsNullOrEmpty(config.OAuthPassphraseHash))
@@ -125,6 +119,13 @@ public static class OAuthEndpoints
             var codeChallenge = form["code_challenge"].ToString();
             var state = form["state"].ToString();
             var scope = form["scope"].ToString();
+
+            var validationError = ValidateClientRedirect(db, clientId, redirectUri);
+            if (validationError is not null)
+                return validationError;
+
+            if (string.IsNullOrEmpty(codeChallenge))
+                return Results.BadRequest(new { error = "invalid_request", error_description = "Missing code_challenge" });
 
             // Validate passphrase
             var hash = HashString(passphrase);
@@ -160,8 +161,10 @@ public static class OAuthEndpoints
                 var code = form["code"].ToString();
                 var codeVerifier = form["code_verifier"].ToString();
                 var clientId = form["client_id"].ToString();
+                var redirectUri = form["redirect_uri"].ToString();
 
-                if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(codeVerifier))
+                if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(codeVerifier)
+                    || string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(redirectUri))
                 {
                     ctx.Response.StatusCode = 400;
                     await ctx.Response.WriteAsJsonAsync(new { error = "invalid_request" });
@@ -177,11 +180,18 @@ public static class OAuthEndpoints
                     return;
                 }
 
-                // Verify client_id matches
-                if (!string.IsNullOrEmpty(clientId) && clientId != codeInfo.ClientId)
+                // Verify client_id and redirect_uri match the original authorization request
+                if (clientId != codeInfo.ClientId)
                 {
                     ctx.Response.StatusCode = 400;
                     await ctx.Response.WriteAsJsonAsync(new { error = "invalid_grant", error_description = "Client mismatch" });
+                    return;
+                }
+
+                if (redirectUri != codeInfo.RedirectUri)
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new { error = "invalid_grant", error_description = "Redirect URI mismatch" });
                     return;
                 }
 
@@ -215,22 +225,22 @@ public static class OAuthEndpoints
                     return;
                 }
 
-                var clientId = db.ConsumeRefreshToken(refreshToken);
-                if (clientId is null)
+                var refreshInfo = db.ConsumeRefreshToken(refreshToken);
+                if (refreshInfo is null)
                 {
                     ctx.Response.StatusCode = 400;
                     await ctx.Response.WriteAsJsonAsync(new { error = "invalid_grant", error_description = "Refresh token expired or revoked" });
                     return;
                 }
 
-                var tokens = db.CreateTokenPair(clientId, "recall");
+                var tokens = db.CreateTokenPair(refreshInfo.ClientId, refreshInfo.Scope);
                 await ctx.Response.WriteAsJsonAsync(new
                 {
                     access_token = tokens.AccessToken,
                     token_type = "Bearer",
                     expires_in = tokens.ExpiresIn,
                     refresh_token = tokens.RefreshToken,
-                    scope = "recall",
+                    scope = refreshInfo.Scope ?? "recall",
                 });
             }
             else
@@ -257,6 +267,24 @@ public static class OAuthEndpoints
         var bytes = Encoding.UTF8.GetBytes(input);
         var hash = SHA256.HashData(bytes);
         return Convert.ToHexStringLower(hash);
+    }
+
+    private static IResult? ValidateClientRedirect(DiaryDatabase db, string clientId, string redirectUri)
+    {
+        if (string.IsNullOrEmpty(clientId))
+            return Results.BadRequest(new { error = "invalid_client" });
+
+        if (string.IsNullOrEmpty(redirectUri))
+            return Results.BadRequest(new { error = "invalid_request", error_description = "Missing redirect_uri" });
+
+        var client = db.GetOAuthClient(clientId);
+        if (client is null)
+            return Results.BadRequest(new { error = "invalid_client" });
+
+        var registeredUris = JsonSerializer.Deserialize<string[]>(client.RedirectUrisJson) ?? [];
+        return registeredUris.Contains(redirectUri)
+            ? null
+            : Results.BadRequest(new { error = "invalid_redirect_uri" });
     }
 
     // ── Login Form ───────────────────────────────────────────

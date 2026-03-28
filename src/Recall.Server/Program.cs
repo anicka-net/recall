@@ -245,7 +245,6 @@ else
         services.AddSingleton(diaryDb);
         if (rohlikClient != null)
             services.AddSingleton(rohlikClient);
-
         var mcpBuilder = services
             .AddMcpServer(options =>
             {

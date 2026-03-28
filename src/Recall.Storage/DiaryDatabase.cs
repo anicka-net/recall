@@ -1248,7 +1248,7 @@ public class DiaryDatabase : IDisposable
         return DateTimeOffset.Parse(expiresAt) > DateTimeOffset.UtcNow;
     }
 
-    public string? ConsumeRefreshToken(string rawToken)
+    public OAuthRefreshTokenInfo? ConsumeRefreshToken(string rawToken)
     {
         var hash = HashKey(rawToken);
         using var cmd = _conn.CreateCommand();
@@ -1261,6 +1261,7 @@ public class DiaryDatabase : IDisposable
         if (!reader.Read()) return null;
 
         var clientId = reader.GetString(0);
+        var scope = reader.IsDBNull(1) ? null : reader.GetString(1);
         var expiresAt = reader.GetString(2);
         reader.Close();
 
@@ -1273,7 +1274,7 @@ public class DiaryDatabase : IDisposable
         revoke.Parameters.AddWithValue("@hash", hash);
         revoke.ExecuteNonQuery();
 
-        return clientId;
+        return new OAuthRefreshTokenInfo(clientId, scope);
     }
 
     public bool HasOAuthTokens()
@@ -1327,3 +1328,7 @@ public record OAuthTokenPair(
     string AccessToken,
     string RefreshToken,
     int ExpiresIn);
+
+public record OAuthRefreshTokenInfo(
+    string ClientId,
+    string? Scope);
