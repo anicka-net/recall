@@ -551,9 +551,17 @@ public class RohlikTools
                         var id = slot.TryGetProperty("slotId", out var sid) ? sid.GetInt32() : 0;
                         var eco = slot.TryGetProperty("eco", out var e) && e.GetBoolean();
                         var premium = slot.TryGetProperty("premium", out var pm) && pm.GetBoolean();
-                        // 15-min slots have format like "17:00-17:15" (15 min span)
-                        var is15 = tw.Length >= 11 && int.TryParse(tw[3..5], out var m1) && int.TryParse(tw[9..11], out var m2)
-                                   && ((m2 - m1 + 60) % 60) == 15;
+                        // Detect 15-min slots by parsing "H:MM–H:MM" (en-dash U+2013) or "H:MM-H:MM"
+                        var is15 = false;
+                        var parts = tw.Split('\u2013', '-');
+                        if (parts.Length == 2
+                            && TimeSpan.TryParse(parts[0].Trim(), out var t1)
+                            && TimeSpan.TryParse(parts[1].Trim(), out var t2))
+                        {
+                            var dur = (t2 - t1).TotalMinutes;
+                            if (dur < 0) dur += 24 * 60;
+                            is15 = dur <= 15;
+                        }
                         daySlots.Add((hourNum, tw, price, cap, id, eco, premium, is15));
                     }
                 }
@@ -569,20 +577,9 @@ public class RohlikTools
                 {
                     var lo = aroundHour.Value - 2;
                     var hi = aroundHour.Value + 2;
-                    foreach (var s in daySlots)
-                    {
-                        if (s.Is15Min)
-                        {
-                            if (s.Hour >= lo && s.Hour <= hi)
-                                filtered.Add((s.TimeWindow, s.Price, s.Cap, s.Id, s.Eco, s.Premium));
-                        }
-                        else
-                        {
-                            // Show hourly slots outside the detail window for context
-                            if (s.Hour < lo || s.Hour > hi)
-                                filtered.Add((s.TimeWindow, s.Price, s.Cap, s.Id, s.Eco, s.Premium));
-                        }
-                    }
+                    // Only show slots within the ±2h window (15-min detail preferred, hourly as fallback)
+                    foreach (var s in daySlots.Where(s => s.Hour >= lo && s.Hour <= hi))
+                        filtered.Add((s.TimeWindow, s.Price, s.Cap, s.Id, s.Eco, s.Premium));
                 }
                 else
                 {
