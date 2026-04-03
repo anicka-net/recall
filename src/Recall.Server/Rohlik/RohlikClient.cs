@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -23,6 +24,9 @@ public class RohlikClient
     private int? _userId;
     private int? _addressId;
     private bool _loggedIn;
+    private string? _checkoutFingerprint;
+    private double _checkoutTotal;
+    private string? _pendingConfirmationCode;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -368,6 +372,46 @@ public class RohlikClient
         }));
     });
 
+    internal string BeginCheckoutSession(CartContent cart)
+    {
+        _checkoutFingerprint = CartFingerprint(cart);
+        _checkoutTotal = cart.TotalPrice;
+        _pendingConfirmationCode = null;
+        return _checkoutFingerprint;
+    }
+
+    internal double GetCheckoutTotal() => _checkoutTotal;
+
+    internal bool HasMatchingCheckoutSession(CartContent cart)
+    {
+        if (_checkoutFingerprint == null)
+            return false;
+        return CartFingerprint(cart) == _checkoutFingerprint;
+    }
+
+    internal string IssuePaymentConfirmationCode()
+    {
+        _pendingConfirmationCode = RandomNumberGenerator.GetHexString(6).ToLowerInvariant();
+        return _pendingConfirmationCode;
+    }
+
+    internal bool VerifyPaymentConfirmationCode(string code)
+    {
+        if (string.IsNullOrEmpty(_pendingConfirmationCode))
+            return false;
+
+        var expected = Encoding.UTF8.GetBytes(_pendingConfirmationCode);
+        var provided = Encoding.UTF8.GetBytes(code);
+        return CryptographicOperations.FixedTimeEquals(expected, provided);
+    }
+
+    internal void ClearCheckoutSession()
+    {
+        _checkoutFingerprint = null;
+        _checkoutTotal = 0;
+        _pendingConfirmationCode = null;
+    }
+
     private static string GenerateRiskData()
     {
         var fingerprint = new
@@ -515,6 +559,16 @@ public class RohlikClient
 
         cart.TotalItems = cart.Products.Count;
         return cart;
+    }
+
+    private static string CartFingerprint(CartContent cart)
+    {
+        var items = cart.Products
+            .OrderBy(p => p.ProductId)
+            .Select(p => $"{p.ProductId}:{p.Quantity}:{p.Price:F2}")
+            .ToList();
+        var data = string.Join("|", items) + $"|total:{cart.TotalPrice:F2}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(data))).ToLower();
     }
 }
 

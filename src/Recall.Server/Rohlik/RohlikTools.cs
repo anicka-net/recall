@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ModelContextProtocol.Server;
@@ -259,10 +258,6 @@ public class RohlikTools
 
     // ── rohlik_checkout ──────────────────────────────────────
 
-    // Cart fingerprint for tamper detection between submit and pay
-    private static string? _cartFingerprint;
-    private static double _cartTotal;
-
     [McpServerTool(Name = "rohlik_checkout")]
     [Description("Submit order and pay. Actions: 'submit' (finalize order, returns payment methods), 'pay' (pay with stored card, requires confirmation_code from TOTP or stderr).")]
     public static async Task<string> Checkout(
@@ -296,9 +291,7 @@ public class RohlikTools
     {
         // Take cart fingerprint before submit
         var cart = await client.GetCartContent();
-        var fingerprint = CartFingerprint(cart);
-        _cartFingerprint = fingerprint;
-        _cartTotal = cart.TotalPrice;
+        var fingerprint = client.BeginCheckoutSession(cart);
 
         var result = await client.SubmitOrder(isSuborder);
 
@@ -351,11 +344,11 @@ public class RohlikTools
             else
             {
                 // Generate random code, print to stderr (invisible to LLM)
-                var randomCode = RandomNumberGenerator.GetHexString(6).ToLower();
+                var randomCode = client.IssuePaymentConfirmationCode();
                 Console.Error.WriteLine($"[ROHLIK PAYMENT] Confirmation code: {randomCode}");
-                Console.Error.WriteLine($"[ROHLIK PAYMENT] Cart total: {_cartTotal:F2} Kč");
+                Console.Error.WriteLine($"[ROHLIK PAYMENT] Cart total: {client.GetCheckoutTotal():F2} Kč");
                 return $"A confirmation code has been printed to stderr. " +
-                       $"Please provide it as confirmationCode to authorize payment of {_cartTotal:F2} Kč.";
+                       $"Please provide it as confirmationCode to authorize payment of {client.GetCheckoutTotal():F2} Kč.";
             }
         }
 
@@ -366,26 +359,19 @@ public class RohlikTools
             if (!Totp.Verify(secret, code))
                 return "Invalid TOTP code. Try again.";
         }
+        else if (!client.VerifyPaymentConfirmationCode(code))
+        {
+            return "Invalid confirmation code. Re-run pay to request a new code.";
+        }
 
         // Verify cart hasn't changed
         var currentCart = await client.GetCartContent();
-        var currentFp = CartFingerprint(currentCart);
-        if (_cartFingerprint != null && currentFp != _cartFingerprint)
+        if (!client.HasMatchingCheckoutSession(currentCart))
             return "Cart has been modified since submit! Please re-submit before paying.";
 
         var result = await client.PayWithStoredCard(methodId, brand, holderName);
-        _cartFingerprint = null;
+        client.ClearCheckoutSession();
         return $"Payment complete.\n\n{FormatJson(result)}";
-    }
-
-    private static string CartFingerprint(CartContent cart)
-    {
-        var items = cart.Products
-            .OrderBy(p => p.ProductId)
-            .Select(p => $"{p.ProductId}:{p.Quantity}:{p.Price:F2}")
-            .ToList();
-        var data = string.Join("|", items) + $"|total:{cart.TotalPrice:F2}";
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(data))).ToLower();
     }
 
     // ── Formatting ───────────────────────────────────────────

@@ -75,7 +75,7 @@ public class DiaryTools
         var noveltyThreshold = memory.NoveltyThreshold ?? 0.0;
         if (noveltyThreshold > 0)
         {
-            var match = db.CheckNovelty(content, noveltyThreshold);
+            var match = db.CheckNovelty(content, access, userScope, noveltyThreshold);
             if (match != null)
                 noveltyNote = $" [similar to #{match.Value.Id} ({match.Value.Score:P0})]";
         }
@@ -89,15 +89,8 @@ public class DiaryTools
     private static string DoUpdate(DiaryDatabase db, AccessLevel access, string? userScope,
         int id, string content, string? tags)
     {
-        if (access == AccessLevel.Coding && db.IsEntryRestricted(id))
-            return $"Entry #{id} is restricted. Guardian access required to edit.";
-
-        if (access == AccessLevel.Scoped)
-        {
-            var entryScope = db.GetEntryScope(id);
-            if (entryScope != userScope)
-                return $"Entry #{id} is not in your scope.";
-        }
+        if (!db.CanAccessEntry(id, access, userScope))
+            return $"Entry #{id} not found or not accessible.";
 
         var success = db.UpdateEntry(id, content, tags);
         if (!success) return $"Entry #{id} not found.";
@@ -106,17 +99,11 @@ public class DiaryTools
 
     private static string DoGet(DiaryDatabase db, AccessLevel access, string? userScope, int id)
     {
+        if (!db.CanAccessEntry(id, access, userScope))
+            return $"Entry #{id} not found or not accessible.";
+
         var entry = db.GetEntry(id);
         if (entry == null) return $"Entry #{id} not found.";
-
-        if (access == AccessLevel.Scoped)
-        {
-            var entryScope = db.GetEntryScope(id);
-            if (entryScope != userScope)
-                return $"Entry #{id} is not in your scope.";
-        }
-        else if (access == AccessLevel.Coding && db.IsEntryRestricted(id))
-            return $"Entry #{id} is restricted. Guardian access required.";
 
         return FormatEntries([entry]);
     }

@@ -122,6 +122,16 @@ public class DiaryDatabase : IDisposable
         return result is string s ? s : null;
     }
 
+    public bool CanAccessEntry(int id, AccessLevel level, string? scope)
+    {
+        var (filter, bind) = AccessFilter(level, scope);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"SELECT COUNT(*) FROM entries WHERE id = @id{filter}";
+        cmd.Parameters.AddWithValue("@id", id);
+        bind?.Invoke(cmd);
+        return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
+    }
+
     /// <summary>
     /// Build SQL filter for access control. Returns (AND-clause, parameter-binder).
     /// Guardian (no explicit scope): scope IS NULL (global entries, restricted + unrestricted)
@@ -180,7 +190,8 @@ public class DiaryDatabase : IDisposable
     /// recent entries via embedding similarity. Returns the most similar entry
     /// ID and score if above threshold, or null if novel enough.
     /// </summary>
-    public (int Id, float Score)? CheckNovelty(string content, double threshold = 0.9)
+    public (int Id, float Score)? CheckNovelty(
+        string content, AccessLevel level, string? scope, double threshold = 0.9)
     {
         if (_embeddings is not { IsAvailable: true } || threshold <= 0)
             return null;
@@ -190,14 +201,17 @@ public class DiaryDatabase : IDisposable
         catch { return null; }
 
         // Compare against last 48 hours of entries
+        var (filter, bind) = AccessFilter(level, scope);
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT id, embedding FROM entries
             WHERE embedding IS NOT NULL
               AND created_at > datetime('now', '-2 days')
+              {filter}
             ORDER BY created_at DESC
             LIMIT 50
             """;
+        bind?.Invoke(cmd);
 
         (int Id, float Score)? best = null;
         using var reader = cmd.ExecuteReader();
@@ -212,6 +226,18 @@ public class DiaryDatabase : IDisposable
         }
 
         return best;
+    }
+
+    internal int CountNoveltyCandidates(AccessLevel level, string? scope)
+    {
+        var (filter, bind) = AccessFilter(level, scope);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT COUNT(*) FROM entries
+            WHERE created_at > datetime('now', '-2 days'){filter}
+            """;
+        bind?.Invoke(cmd);
+        return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
     public bool UpdateEntry(int id, string content, string? tags = null)
