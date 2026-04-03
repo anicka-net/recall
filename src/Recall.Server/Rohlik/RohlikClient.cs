@@ -298,7 +298,7 @@ public class RohlikClient
             $"/services/frontend-service/timeslots-api/{cartTotal}?userId={_userId}&addressId={_addressId}&reasonableDeliveryTime=false"));
     });
 
-    public Task<JsonElement> ReserveTimeslot(int slotId, string slotType = "ON_TIME")
+    public Task<JsonElement> ReserveTimeslot(int slotId, string slotType = "VIRTUAL")
         => WithSession(async () => Unwrap(await Post(
             "/services/frontend-service/v1/timeslot-reservation",
             new { slotId, slotType })));
@@ -338,6 +338,10 @@ public class RohlikClient
         {
             adyenPayload = new
             {
+                riskData = new
+                {
+                    clientData = GenerateRiskData()
+                },
                 paymentMethod = new
                 {
                     type = "scheme",
@@ -353,14 +357,49 @@ public class RohlikClient
                     javaEnabled = false,
                     screenHeight = 1440,
                     screenWidth = 2560,
-                    userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                    timeZoneOffset = -60
+                    userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                    timeZoneOffset = -120
                 },
                 origin = _baseUrl,
                 clientStateDataIndicator = true
-            }
+            },
+            origin = "WEB",
+            oneClick = "used"
         }));
     });
+
+    private static string GenerateRiskData()
+    {
+        var fingerprint = new
+        {
+            version = "1.0.0",
+            deviceFingerprint = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(64)).ToLower(),
+            persistentCookie = Array.Empty<string>(),
+            components = new
+            {
+                userAgent = Convert.ToHexString(System.Security.Cryptography.MD5.HashData(
+                    Encoding.UTF8.GetBytes("Mozilla/5.0 (X11; Linux x86_64)"))).ToLower(),
+                webdriver = 0,
+                language = "cs-CZ",
+                colorDepth = 24,
+                deviceMemory = 8,
+                pixelRatio = 1,
+                hardwareConcurrency = 8,
+                screenWidth = 2560,
+                screenHeight = 1440,
+                availableScreenWidth = 2560,
+                availableScreenHeight = 1410,
+                timezoneOffset = -120,
+                timezone = "Europe/Prague",
+                sessionStorage = 1,
+                localStorage = 1,
+                indexedDb = 1,
+                platform = "Linux x86_64",
+            }
+        };
+        var json = JsonSerializer.Serialize(fingerprint, JsonOpts);
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
+    }
 
     // ── Last Minute ──────────────────────────────────────────
 
@@ -377,6 +416,9 @@ public class RohlikClient
         (300111000, "Domácnost a zahrada"),
         (300112000, "Zvíře"),
         (300112393, "Speciální výživa"),
+        (300112909, "Marks & Spencer"),
+        (300114741, "Otoč obal"),
+        (300117732, "Bistro"),
         (300121429, "Plant Based"),
         (300124206, "Kosmetika"),
     ];

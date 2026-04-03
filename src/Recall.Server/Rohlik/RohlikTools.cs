@@ -196,13 +196,14 @@ public class RohlikTools
     // ── rohlik_delivery ──────────────────────────────────────
 
     [McpServerTool(Name = "rohlik_delivery")]
-    [Description("Rohlik delivery info and timeslots. Actions: 'info' (next delivery, fees), 'slots' (available times), 'reserve' (reserve a slot by ID).")]
+    [Description("Rohlik delivery info and timeslots. Actions: 'info' (next delivery, fees), 'slots' (available times, optionally filtered by hour), 'reserve' (reserve a slot by ID).")]
     public static async Task<string> Delivery(
         RohlikClient? client = null,
         [Description("Action: info, slots, reserve")] string action = "info",
         [Description("Slot ID (for action=reserve)")] int? slotId = null,
-        [Description("Slot type: ON_TIME, EXPRESS (for action=reserve)")] string slotType = "ON_TIME",
-        [Description("Cart total for timeslot calculation")] int? cartTotal = null)
+        [Description("Slot type: VIRTUAL (standard), EXPRESS (for action=reserve)")] string slotType = "VIRTUAL",
+        [Description("Cart total for timeslot calculation")] int? cartTotal = null,
+        [Description("Filter slots around this hour (0-23), shows ±2h window with 15-min detail")] int? aroundHour = null)
     {
         var (ok, error) = CheckAccess(client);
         if (!ok) return error!;
@@ -211,10 +212,10 @@ public class RohlikTools
         {
             return action switch
             {
-                "info" => FormatJson(await client!.GetDeliveryInfo()),
-                "slots" when cartTotal != null => FormatSlots(await client!.GetTimeslots(cartTotal.Value)),
-                "slots" => FormatSlots(await client!.GetDeliverySlots()),
-                "reserve" when slotId != null => FormatJson(await client!.ReserveTimeslot(slotId.Value, slotType)),
+                "info" => FormatDeliveryInfo(await client!.GetDeliveryInfo()),
+                "slots" when cartTotal != null => FormatSlots(await client!.GetTimeslots(cartTotal.Value), aroundHour),
+                "slots" => FormatSlots(await client!.GetDeliverySlots(), aroundHour),
+                "reserve" when slotId != null => FormatReservation(await client!.ReserveTimeslot(slotId.Value, slotType)),
                 "reserve" => "Provide slotId to reserve.",
                 _ => $"Unknown action '{action}'. Use: info, slots, reserve"
             };
@@ -242,9 +243,9 @@ public class RohlikTools
             return action switch
             {
                 "premium" => FormatPremium(await client!.GetPremiumInfo()),
-                "announcements" => FormatJson(await client!.GetAnnouncements()),
-                "bags" => FormatJson(await client!.GetReusableBagsInfo()),
-                "checkout" => FormatJson(await client!.GetCheckoutStatus()),
+                "announcements" => FormatAnnouncements(await client!.GetAnnouncements()),
+                "bags" => FormatBags(await client!.GetReusableBagsInfo()),
+                "checkout" => FormatCheckout(await client!.GetCheckoutStatus()),
                 "shopping_list" when shoppingListId != null => FormatJson(await client!.GetShoppingList(shoppingListId)),
                 "shopping_list" => "Provide shoppingListId.",
                 _ => $"Unknown action '{action}'. Use: premium, announcements, bags, checkout, shopping_list"
@@ -305,11 +306,30 @@ public class RohlikTools
         sb.AppendLine($"Cart: {cart.TotalItems} items, {cart.TotalPrice:F2} Kč");
         sb.AppendLine($"Cart fingerprint: {fingerprint[..8]}...");
         sb.AppendLine();
-        sb.AppendLine("Now call with action='pay' and provide:");
-        sb.AppendLine("- storedPaymentMethodId, brand, holderName");
-        sb.AppendLine("- confirmationCode (6-digit TOTP or code from stderr)");
+
+        // Parse stored payment methods
+        if (result.TryGetProperty("data", out var data) && data.TryGetProperty("payload", out var payload)
+            && payload.TryGetProperty("storedPaymentMethods", out var methods))
+        {
+            sb.AppendLine("Stored payment methods:");
+            foreach (var m in methods.EnumerateArray())
+            {
+                var name = m.TryGetProperty("name", out var n) ? n.GetString() : "?";
+                var last4 = m.TryGetProperty("lastFour", out var l) ? l.GetString() : "?";
+                var brand = m.TryGetProperty("brand", out var b) ? b.GetString() : "?";
+                var holder = m.TryGetProperty("holderName", out var h) ? h.GetString() : "?";
+                var id = m.TryGetProperty("id", out var mid) ? mid.GetString() : "?";
+                var exp = "";
+                if (m.TryGetProperty("expiryMonth", out var em) && m.TryGetProperty("expiryYear", out var ey))
+                    exp = $" exp {em.GetString()}/{ey.GetString()}";
+                sb.AppendLine($"  - {name} ****{last4}{exp} ({holder}) [id: {id}, brand: {brand}]");
+            }
+        }
+
         sb.AppendLine();
-        sb.AppendLine($"Payment methods:\n{FormatJson(result)}");
+        sb.AppendLine("Now call with action='pay' and provide:");
+        sb.AppendLine("- storedPaymentMethodId, brand, holderName (from above)");
+        sb.AppendLine("- confirmationCode (6-digit TOTP or code from stderr)");
         return sb.ToString();
     }
 
@@ -472,69 +492,262 @@ public class RohlikTools
         return sb.ToString();
     }
 
-    private static string FormatSlots(JsonElement data)
+    private static string FormatSlots(JsonElement data, int? aroundHour = null)
     {
         var sb = new StringBuilder();
 
-        // Preselected slots (quick picks: fastest, cheapest, eco)
-        if (data.TryGetProperty("preselectedSlots", out var preselected))
+        // Express slot
+        if (data.TryGetProperty("expressSlot", out var express) && express.ValueKind == JsonValueKind.Object)
+        {
+            var id = express.TryGetProperty("slotId", out var sid) ? sid.GetInt32().ToString() : "?";
+            var since = express.TryGetProperty("since", out var s) ? s.GetString()?[11..16] : "?";
+            var till = express.TryGetProperty("till", out var t) ? t.GetString()?[11..16] : "?";
+            var price = express.TryGetProperty("price", out var pr) ? pr.GetDouble().ToString("F0") : "?";
+            sb.AppendLine($"Express: {since}–{till} — {price} Kč [slotId: {id}]");
+            sb.AppendLine();
+        }
+
+        // Preselected slots (quick picks)
+        if (data.TryGetProperty("preselectedSlots", out var preselected) && preselected.GetArrayLength() > 0)
         {
             sb.AppendLine("Suggested slots:");
             foreach (var ps in preselected.EnumerateArray())
             {
                 var title = ps.TryGetProperty("title", out var t) ? t.GetString() : "?";
                 var subtitle = ps.TryGetProperty("subtitle", out var st) ? st.GetString() : "";
-                if (ps.TryGetProperty("slot", out var slot) && slot.ValueKind != System.Text.Json.JsonValueKind.Null)
+                if (ps.TryGetProperty("slot", out var slot) && slot.ValueKind != JsonValueKind.Null)
                 {
                     var id = slot.TryGetProperty("slotId", out var sid) ? sid.GetInt32().ToString() : "?";
                     var price = slot.TryGetProperty("price", out var pr) ? pr.GetDouble().ToString("F0") : "?";
                     var cap = slot.TryGetProperty("capacity", out var c) ? c.GetString() : "?";
-                    sb.AppendLine($"  {title} {subtitle} — {price} Kč, {cap} [slotId: {id}]");
-                }
-                else
-                {
-                    sb.AppendLine($"  {title} {subtitle}");
+                    var status = cap == "RED" ? " (full)" : cap == "ORANGE" ? " (limited)" : "";
+                    sb.AppendLine($"  {title} {subtitle} — {price} Kč{status} [slotId: {id}]");
                 }
             }
             sb.AppendLine();
         }
 
-        // Detailed 15-min slots per day
+        // Slots per day
         if (data.TryGetProperty("availabilityDays", out var days))
         {
             foreach (var day in days.EnumerateArray())
             {
                 var date = day.TryGetProperty("date", out var d) ? d.GetString() : "?";
                 var label = day.TryGetProperty("label", out var l) ? l.GetString() : date;
-                sb.AppendLine($"{label} ({date}):");
 
-                if (!day.TryGetProperty("slots", out var slots))
-                {
-                    sb.AppendLine("  (no slots)");
+                if (!day.TryGetProperty("slots", out var slots) || slots.ValueKind != JsonValueKind.Object)
                     continue;
-                }
 
-                // Slots are keyed by hour: {"13": [...], "14": [...]}
+                var daySlots = new List<(int Hour, string TimeWindow, double Price, string Cap, int Id, bool Eco, bool Premium, bool Is15Min)>();
+
                 foreach (var hourProp in slots.EnumerateObject())
                 {
+                    if (!int.TryParse(hourProp.Name, out var hourNum)) continue;
                     foreach (var slot in hourProp.Value.EnumerateArray())
                     {
-                        var tw = slot.TryGetProperty("timeWindow", out var w) ? w.GetString() : "?";
-                        var price = slot.TryGetProperty("price", out var pr) ? pr.GetDouble().ToString("F0") : "?";
-                        var cap = slot.TryGetProperty("capacity", out var c) ? c.GetString() : "?";
-                        var id = slot.TryGetProperty("slotId", out var sid) ? sid.GetInt32().ToString() : "?";
-                        var eco = slot.TryGetProperty("eco", out var e) && e.GetBoolean() ? " ECO" : "";
-                        var premium = slot.TryGetProperty("premium", out var pm) && pm.GetBoolean() ? " PREMIUM" : "";
-                        var status = cap == "RED" ? " (full)" : cap == "ORANGE" ? " (limited)" : "";
-
-                        sb.AppendLine($"  {tw} — {price} Kč{eco}{premium}{status} [slotId: {id}]");
+                        var tw = slot.TryGetProperty("timeWindow", out var w) ? w.GetString() ?? "" : "";
+                        var price = slot.TryGetProperty("price", out var pr) ? pr.GetDouble() : 0;
+                        var cap = slot.TryGetProperty("capacity", out var c) ? c.GetString() ?? "" : "";
+                        var id = slot.TryGetProperty("slotId", out var sid) ? sid.GetInt32() : 0;
+                        var eco = slot.TryGetProperty("eco", out var e) && e.GetBoolean();
+                        var premium = slot.TryGetProperty("premium", out var pm) && pm.GetBoolean();
+                        // 15-min slots have format like "17:00-17:15" (15 min span)
+                        var is15 = tw.Length >= 11 && int.TryParse(tw[3..5], out var m1) && int.TryParse(tw[9..11], out var m2)
+                                   && ((m2 - m1 + 60) % 60) == 15;
+                        daySlots.Add((hourNum, tw, price, cap, id, eco, premium, is15));
                     }
+                }
+
+                if (daySlots.Count == 0) continue;
+
+                // Filter logic:
+                // - If aroundHour set: show hourly slots outside window, 15-min slots within ±2h
+                // - If no filter: show only hourly slots (skip 15-min)
+                var filtered = new List<(string TimeWindow, double Price, string Cap, int Id, bool Eco, bool Premium)>();
+
+                if (aroundHour != null)
+                {
+                    var lo = aroundHour.Value - 2;
+                    var hi = aroundHour.Value + 2;
+                    foreach (var s in daySlots)
+                    {
+                        if (s.Is15Min)
+                        {
+                            if (s.Hour >= lo && s.Hour <= hi)
+                                filtered.Add((s.TimeWindow, s.Price, s.Cap, s.Id, s.Eco, s.Premium));
+                        }
+                        else
+                        {
+                            // Show hourly slots outside the detail window for context
+                            if (s.Hour < lo || s.Hour > hi)
+                                filtered.Add((s.TimeWindow, s.Price, s.Cap, s.Id, s.Eco, s.Premium));
+                        }
+                    }
+                }
+                else
+                {
+                    // No filter — only hourly slots
+                    foreach (var s in daySlots.Where(s => !s.Is15Min))
+                        filtered.Add((s.TimeWindow, s.Price, s.Cap, s.Id, s.Eco, s.Premium));
+                }
+
+                if (filtered.Count == 0) continue;
+
+                sb.AppendLine($"{label} ({date}):");
+                foreach (var s in filtered)
+                {
+                    var eco = s.Eco ? " ECO" : "";
+                    var premium = s.Premium ? " PREMIUM" : "";
+                    var status = s.Cap == "RED" ? " (full)" : s.Cap == "ORANGE" ? " (limited)" : "";
+                    sb.AppendLine($"  {s.TimeWindow} — {s.Price:F0} Kč{eco}{premium}{status} [slotId: {s.Id}]");
                 }
                 sb.AppendLine();
             }
         }
 
+        if (sb.Length == 0)
+            sb.AppendLine("No available slots.");
+
+        if (aroundHour == null)
+            sb.AppendLine("Tip: use aroundHour (0-23) to see 15-minute slots near a specific time.");
+
         return sb.ToString();
+    }
+
+    private static string FormatDeliveryInfo(JsonElement data)
+    {
+        var sb = new StringBuilder("Delivery info:\n");
+        if (data.TryGetProperty("deliveryType", out var dt))
+            sb.AppendLine($"  Type: {dt.GetString()}");
+        if (data.TryGetProperty("firstDeliveryText", out var fd) && fd.TryGetProperty("default", out var fdd))
+            sb.AppendLine($"  Earliest: {fdd.GetString()}");
+        if (data.TryGetProperty("earlierDelivery", out var ed))
+            sb.AppendLine($"  Earlier option: {ed.GetString()}");
+        if (data.TryGetProperty("deliveryLocationText", out var dl))
+            sb.AppendLine($"  Address: {dl.GetString()}");
+        return sb.ToString();
+    }
+
+    private static string FormatReservation(JsonElement data)
+    {
+        if (data.TryGetProperty("active", out var active) && active.GetBoolean()
+            && data.TryGetProperty("reservationDetail", out var detail))
+        {
+            var tw = detail.TryGetProperty("dayAndTimeWindow", out var d) ? d.GetString() : "?";
+            var id = detail.TryGetProperty("slotId", out var sid) ? sid.GetInt32().ToString() : "?";
+            var till = detail.TryGetProperty("till", out var t) ? t.GetString() : "?";
+            return $"Slot reserved: {tw} [slotId: {id}]\nReservation valid until: {till}";
+        }
+        return "No active reservation.";
+    }
+
+    private static string FormatAnnouncements(JsonElement data)
+    {
+        if (data.TryGetProperty("announcements", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            if (arr.GetArrayLength() == 0) return "No announcements.";
+            var sb = new StringBuilder("Announcements:\n");
+            foreach (var a in arr.EnumerateArray())
+            {
+                var title = a.TryGetProperty("title", out var t) && t.GetString() is { Length: > 0 } ts ? ts : null;
+                var content = a.TryGetProperty("content", out var c) ? StripHtml(c.GetString() ?? "") : "";
+                if (title != null) sb.AppendLine($"  [{title}] {content}");
+                else sb.AppendLine($"  {content}");
+            }
+            return sb.ToString();
+        }
+        // Fallback: the response might be the array directly
+        if (data.ValueKind == JsonValueKind.Array)
+        {
+            if (data.GetArrayLength() == 0) return "No announcements.";
+            var sb = new StringBuilder("Announcements:\n");
+            foreach (var a in data.EnumerateArray())
+            {
+                var content = a.TryGetProperty("content", out var c) ? StripHtml(c.GetString() ?? "") : "";
+                sb.AppendLine($"  {content}");
+            }
+            return sb.ToString();
+        }
+        return "No announcements.";
+    }
+
+    private static string FormatBags(JsonElement data)
+    {
+        var current = data.TryGetProperty("current", out var c) ? c.GetInt32() : 0;
+        var max = data.TryGetProperty("max", out var m) ? m.GetInt32() : 0;
+        var progress = data.TryGetProperty("progress", out var p) ? p.GetDouble() : 0;
+        var sb = new StringBuilder($"Reusable bags: {current}/{max} ({progress * 100:F0}%)\n");
+        if (data.TryGetProperty("deposit", out var dep) && dep.ValueKind != JsonValueKind.Null)
+            sb.AppendLine($"Deposit: {dep}");
+        if (data.TryGetProperty("severity", out var sev))
+        {
+            var level = sev.GetInt32();
+            if (level >= 2) sb.AppendLine("Please return some bags on your next delivery.");
+        }
+        return sb.ToString();
+    }
+
+    private static string FormatCheckout(JsonElement data)
+    {
+        var sb = new StringBuilder("Checkout status:\n\n");
+
+        if (!data.TryGetProperty("checkout", out var checkout)) return FormatJson(data);
+
+        var allValid = false;
+        if (checkout.TryGetProperty("formSections", out var sections))
+        {
+            if (sections.TryGetProperty("allSectionsValid", out var av))
+                allValid = av.GetBoolean();
+
+            FormatCheckoutSection(sb, sections, "addressSection", "Address");
+            FormatCheckoutSection(sb, sections, "timeslotSection", "Timeslot");
+            FormatCheckoutSection(sb, sections, "paymentSection", "Payment");
+            FormatCheckoutSection(sb, sections, "packagingSection", "Packaging");
+            FormatCheckoutSection(sb, sections, "contactSection", "Contact");
+            FormatCheckoutSection(sb, sections, "courierSection", "Courier note");
+        }
+
+        sb.AppendLine(allValid ? "All sections valid — ready to submit." : "Some sections incomplete — not ready to submit.");
+
+        if (checkout.TryGetProperty("additionalSections", out var additional)
+            && additional.TryGetProperty("calculation", out var calc)
+            && calc.TryGetProperty("data", out var calcData))
+        {
+            if (calcData.TryGetProperty("approxPrice", out var ap))
+                sb.AppendLine($"\nTotal: {ap.GetString()}");
+            if (calcData.TryGetProperty("priceComposition", out var pc))
+            {
+                foreach (var item in pc.EnumerateArray())
+                {
+                    var label = item.TryGetProperty("label", out var l) ? l.GetString() : "?";
+                    var price = item.TryGetProperty("formattedPrice", out var fp) ? fp.GetString() : "?";
+                    sb.AppendLine($"  {label}: {price}");
+                }
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private static void FormatCheckoutSection(StringBuilder sb, JsonElement sections, string key, string label)
+    {
+        if (!sections.TryGetProperty(key, out var section)
+            || !section.TryGetProperty("data", out var data)) return;
+
+        var valid = data.TryGetProperty("valid", out var v) && v.GetBoolean();
+        var summary = data.TryGetProperty("summaryTitle", out var st) ? st.GetString() : "";
+        var detail = data.TryGetProperty("summary", out var sd) ? sd.GetString() : "";
+        var marker = valid ? "+" : "-";
+        if (!string.IsNullOrEmpty(detail))
+            detail = StripHtml(detail);
+        sb.AppendLine($"  [{marker}] {label}: {summary} — {detail}");
+    }
+
+    private static string StripHtml(string html)
+    {
+        // Simple HTML tag removal
+        return System.Text.RegularExpressions.Regex.Replace(html, "<[^>]+>", " ")
+            .Replace("  ", " ").Trim();
     }
 
     private static string FormatJson(JsonElement el)
