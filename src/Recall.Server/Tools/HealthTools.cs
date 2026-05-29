@@ -23,8 +23,12 @@ public partial class HealthTools
         [Description("Access secret")] string? secret = null)
     {
         var (access, _) = db.ResolveAccess(secret, config.GuardianSecretHash, config.CodingSecretHash, config.Scopes);
-        if (access != AccessLevel.Guardian)
-            return "Health data requires guardian access.";
+        if (access == AccessLevel.None)
+            return "Access denied. Provide a valid secret.";
+
+        var isWrite = action is "log_migraine" or "log_period";
+        if (isWrite && access != AccessLevel.Guardian)
+            return "Logging health events requires guardian access.";
 
         return action switch
         {

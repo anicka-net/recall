@@ -45,7 +45,7 @@ public class DiaryTools
             "update" => "Provide id to update.",
             "get" when id != null => DoGet(db, access, userScope, id.Value),
             "get" => "Provide id.",
-            "pin" when id != null => DoPin(db, access, id.Value, pin, foundational),
+            "pin" when id != null => DoPin(db, access, userScope, id.Value, pin, foundational),
             "pin" => "Provide id to pin.",
             _ => $"Unknown action '{action}'. Use: write, update, get, pin"
         };
@@ -108,10 +108,14 @@ public class DiaryTools
         return FormatEntries([entry]);
     }
 
-    private static string DoPin(DiaryDatabase db, AccessLevel access, int id, bool pin, bool foundational)
+    private static string DoPin(DiaryDatabase db, AccessLevel access, string? userScope,
+        int id, bool pin, bool foundational)
     {
-        if (access != AccessLevel.Guardian)
-            return "Only guardian can pin entries.";
+        if (foundational && access != AccessLevel.Guardian)
+            return "Only guardian can mark entries as foundational.";
+
+        if (!db.CanAccessEntry(id, access, userScope))
+            return $"Entry #{id} not found or not accessible.";
 
         var success = db.SetPin(id, pin, foundational);
         if (!success) return $"Entry #{id} not found.";

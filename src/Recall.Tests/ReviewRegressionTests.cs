@@ -61,6 +61,32 @@ public sealed class ReviewRegressionTests : IDisposable
     }
 
     [Fact]
+    public void Scoped_user_can_pin_own_entry_but_not_other_scope()
+    {
+        var alphaId = _db.WriteEntry("Alpha entry", scope: "alpha", restricted: false);
+        var betaId = _db.WriteEntry("Beta entry", scope: "beta", restricted: false);
+
+        var okResult = DiaryTools.Entry(_db, _config,
+            action: "pin", id: alphaId, pin: true, secret: AlphaSecret);
+        var crossResult = DiaryTools.Entry(_db, _config,
+            action: "pin", id: betaId, pin: true, secret: AlphaSecret);
+
+        Assert.Equal($"Entry #{alphaId} marked as pinned.", okResult);
+        Assert.Equal($"Entry #{betaId} not found or not accessible.", crossResult);
+    }
+
+    [Fact]
+    public void Scoped_user_cannot_mark_foundational()
+    {
+        var alphaId = _db.WriteEntry("Alpha entry", scope: "alpha", restricted: false);
+
+        var result = DiaryTools.Entry(_db, _config,
+            action: "pin", id: alphaId, foundational: true, secret: AlphaSecret);
+
+        Assert.Equal("Only guardian can mark entries as foundational.", result);
+    }
+
+    [Fact]
     public void Diary_tools_do_not_log_access_secret()
     {
         var originalErr = Console.Error;
