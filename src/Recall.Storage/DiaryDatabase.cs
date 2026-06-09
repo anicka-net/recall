@@ -63,6 +63,11 @@ public class DiaryDatabase : IDisposable
         _embeddings = embeddings;
     }
 
+    private readonly object _dbLock = new();
+
+    private static string EscapeLike(string s) =>
+        s.Replace("!", "!!").Replace("%", "!%").Replace("_", "!_");
+
     public (AccessLevel Level, string? Scope) ResolveAccess(
         string? secret, string? guardianHash, string? codingHash, IReadOnlyList<ScopeEntry>? scopes = null)
     {
@@ -258,17 +263,26 @@ public class DiaryDatabase : IDisposable
         }
 
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE entries
-            SET content = @content,
-                tags = @tags,
-                embedding = @emb
-            WHERE id = @id
-            """;
+        if (embeddingBlob != null)
+        {
+            cmd.CommandText = """
+                UPDATE entries
+                SET content = @content, tags = @tags, embedding = @emb
+                WHERE id = @id
+                """;
+            cmd.Parameters.AddWithValue("@emb", (object)embeddingBlob);
+        }
+        else
+        {
+            cmd.CommandText = """
+                UPDATE entries
+                SET content = @content, tags = @tags
+                WHERE id = @id
+                """;
+        }
         cmd.Parameters.AddWithValue("@id", id);
         cmd.Parameters.AddWithValue("@content", content);
         cmd.Parameters.AddWithValue("@tags", (object?)tags ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@emb", (object?)embeddingBlob ?? DBNull.Value);
         return cmd.ExecuteNonQuery() > 0;
     }
 
@@ -408,7 +422,8 @@ public class DiaryDatabase : IDisposable
                 // Cap drift tags — don't let tags grow unboundedly
                 if (existingTags.Count >= 20) continue;
 
-                var newTags = words.Where(w => !existingTags.Contains(w)).ToList();
+                var budget = 20 - existingTags.Count;
+                var newTags = words.Where(w => !existingTags.Contains(w)).Take(budget).ToList();
                 if (newTags.Count == 0) continue;
 
                 var updated = string.IsNullOrEmpty(existing)
@@ -435,7 +450,7 @@ public class DiaryDatabase : IDisposable
         var (filter, bind) = AccessFilter(level, scope);
 
         // Match entries where tags contain ANY of the query words
-        var tagClauses = words.Select((_, i) => $"tags LIKE @tag{i}").ToList();
+        var tagClauses = words.Select((_, i) => $"tags LIKE @tag{i} ESCAPE '!'").ToList();
         var tagFilter = string.Join(" OR ", tagClauses);
 
         using var cmd = _conn.CreateCommand();
@@ -447,7 +462,7 @@ public class DiaryDatabase : IDisposable
             LIMIT @limit
             """;
         for (int i = 0; i < words.Length; i++)
-            cmd.Parameters.AddWithValue($"@tag{i}", $"%{words[i]}%");
+            cmd.Parameters.AddWithValue($"@tag{i}", $"%{EscapeLike(words[i])}%");
         cmd.Parameters.AddWithValue("@maxTier", maxTier);
         cmd.Parameters.AddWithValue("@limit", limit);
         bind?.Invoke(cmd);
@@ -561,11 +576,11 @@ public class DiaryDatabase : IDisposable
         cmd.CommandText = $"""
             SELECT id, created_at, content, tags, conversation_id
             FROM entries
-            WHERE (content LIKE @pattern OR tags LIKE @pattern) AND tier <= @maxTier{filter}
+            WHERE (content LIKE @pattern ESCAPE '!' OR tags LIKE @pattern ESCAPE '!') AND tier <= @maxTier{filter}
             ORDER BY created_at DESC
             LIMIT @limit
             """;
-        cmd.Parameters.AddWithValue("@pattern", $"%{query}%");
+        cmd.Parameters.AddWithValue("@pattern", $"%{EscapeLike(query)}%");
         cmd.Parameters.AddWithValue("@limit", limit);
         cmd.Parameters.AddWithValue("@maxTier", maxTier);
         bind?.Invoke(cmd);
@@ -914,10 +929,10 @@ public class DiaryDatabase : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             SELECT date, summary FROM health_data
-            WHERE summary LIKE @pattern
+            WHERE summary LIKE @pattern ESCAPE '!'
             ORDER BY date DESC LIMIT @limit
             """;
-        cmd.Parameters.AddWithValue("@pattern", $"%{query}%");
+        cmd.Parameters.AddWithValue("@pattern", $"%{EscapeLike(query)}%");
         cmd.Parameters.AddWithValue("@limit", limit);
 
         var entries = new List<HealthEntry>();
@@ -1063,21 +1078,11 @@ public class DiaryDatabase : IDisposable
     public bool ValidateApiKey(string rawKey)
     {
         var hash = HashKey(rawKey);
-
-        using var checkCmd = _conn.CreateCommand();
-        checkCmd.CommandText = "SELECT id FROM api_keys WHERE key_hash = @hash AND revoked = 0";
-        checkCmd.Parameters.AddWithValue("@hash", hash);
-        var result = checkCmd.ExecuteScalar();
-        if (result is null) return false;
-
-        // Update last_used
-        using var updateCmd = _conn.CreateCommand();
-        updateCmd.CommandText = "UPDATE api_keys SET last_used = @now WHERE id = @id";
-        updateCmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
-        updateCmd.Parameters.AddWithValue("@id", result);
-        updateCmd.ExecuteNonQuery();
-
-        return true;
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE api_keys SET last_used = @now WHERE key_hash = @hash AND revoked = 0";
+        cmd.Parameters.AddWithValue("@hash", hash);
+        cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToString("o"));
+        return cmd.ExecuteNonQuery() > 0;
     }
 
     /// <summary>
@@ -1192,36 +1197,36 @@ public class DiaryDatabase : IDisposable
 
     public OAuthCodeInfo? ConsumeAuthCode(string code)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT code, client_id, redirect_uri, code_challenge, scope, expires_at
-            FROM oauth_codes WHERE code = @code AND used = 0
-            """;
-        cmd.Parameters.AddWithValue("@code", code);
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read()) return null;
+        lock (_dbLock)
+        {
+            // Atomically mark as used first — prevents double-spend race
+            using var mark = _conn.CreateCommand();
+            mark.CommandText = "UPDATE oauth_codes SET used = 1 WHERE code = @code AND used = 0";
+            mark.Parameters.AddWithValue("@code", code);
+            if (mark.ExecuteNonQuery() == 0) return null;
 
-        var info = new OAuthCodeInfo(
-            reader.GetString(0),
-            reader.GetString(1),
-            reader.GetString(2),
-            reader.GetString(3),
-            reader.IsDBNull(4) ? null : reader.GetString(4),
-            reader.GetString(5));
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT code, client_id, redirect_uri, code_challenge, scope, expires_at
+                FROM oauth_codes WHERE code = @code
+                """;
+            cmd.Parameters.AddWithValue("@code", code);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
 
-        reader.Close();
+            var info = new OAuthCodeInfo(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.GetString(5));
 
-        // Check expiry
-        if (DateTimeOffset.Parse(info.ExpiresAt) < DateTimeOffset.UtcNow)
-            return null;
+            if (DateTimeOffset.Parse(info.ExpiresAt) < DateTimeOffset.UtcNow)
+                return null;
 
-        // Mark as used
-        using var update = _conn.CreateCommand();
-        update.CommandText = "UPDATE oauth_codes SET used = 1 WHERE code = @code";
-        update.Parameters.AddWithValue("@code", code);
-        update.ExecuteNonQuery();
-
-        return info;
+            return info;
+        }
     }
 
     public OAuthTokenPair CreateTokenPair(string clientId, string? scope)
@@ -1277,30 +1282,32 @@ public class DiaryDatabase : IDisposable
     public OAuthRefreshTokenInfo? ConsumeRefreshToken(string rawToken)
     {
         var hash = HashKey(rawToken);
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT client_id, scope, expires_at FROM oauth_tokens
-            WHERE token_hash = @hash AND token_type = 'refresh' AND revoked = 0
-            """;
-        cmd.Parameters.AddWithValue("@hash", hash);
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read()) return null;
+        lock (_dbLock)
+        {
+            // Atomically revoke first — prevents double-spend race
+            using var revoke = _conn.CreateCommand();
+            revoke.CommandText = """
+                UPDATE oauth_tokens SET revoked = 1
+                WHERE token_hash = @hash AND token_type = 'refresh' AND revoked = 0
+                """;
+            revoke.Parameters.AddWithValue("@hash", hash);
+            if (revoke.ExecuteNonQuery() == 0) return null;
 
-        var clientId = reader.GetString(0);
-        var scope = reader.IsDBNull(1) ? null : reader.GetString(1);
-        var expiresAt = reader.GetString(2);
-        reader.Close();
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT client_id, scope, expires_at FROM oauth_tokens WHERE token_hash = @hash";
+            cmd.Parameters.AddWithValue("@hash", hash);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
 
-        if (DateTimeOffset.Parse(expiresAt) < DateTimeOffset.UtcNow)
-            return null;
+            var clientId = reader.GetString(0);
+            var scope = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var expiresAt = reader.GetString(2);
 
-        // Revoke used refresh token (rotation)
-        using var revoke = _conn.CreateCommand();
-        revoke.CommandText = "UPDATE oauth_tokens SET revoked = 1 WHERE token_hash = @hash";
-        revoke.Parameters.AddWithValue("@hash", hash);
-        revoke.ExecuteNonQuery();
+            if (DateTimeOffset.Parse(expiresAt) < DateTimeOffset.UtcNow)
+                return null;
 
-        return new OAuthRefreshTokenInfo(clientId, scope);
+            return new OAuthRefreshTokenInfo(clientId, scope);
+        }
     }
 
     public bool HasOAuthTokens()

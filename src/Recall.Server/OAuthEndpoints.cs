@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -293,8 +294,13 @@ public static class OAuthEndpoints
         string clientId, string redirectUri, string codeChallenge,
         string state, string scope, string? error = null)
     {
+        clientId = WebUtility.HtmlEncode(clientId);
+        redirectUri = WebUtility.HtmlEncode(redirectUri);
+        codeChallenge = WebUtility.HtmlEncode(codeChallenge);
+        state = WebUtility.HtmlEncode(state);
+        scope = WebUtility.HtmlEncode(scope);
         var errorHtml = error is not null
-            ? $"""<p style="color:#c0392b;margin-bottom:16px">{error}</p>"""
+            ? $"""<p style="color:#c0392b;margin-bottom:16px">{WebUtility.HtmlEncode(error)}</p>"""
             : "";
 
         return $$"""

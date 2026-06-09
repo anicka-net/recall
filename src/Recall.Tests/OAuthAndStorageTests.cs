@@ -76,6 +76,43 @@ public sealed class OAuthAndStorageTests
         Assert.Contains("Redirect URI mismatch", payload);
     }
 
+    [Fact]
+    public void ConsumeAuthCode_CannotBeUsedTwice()
+    {
+        using var db = CreateDatabase();
+        var clientId = db.RegisterOAuthClient("test", """["https://cb.example"]""");
+        var code = db.CreateAuthCode(clientId, "https://cb.example", "challenge", null);
+
+        var first = db.ConsumeAuthCode(code);
+        var second = db.ConsumeAuthCode(code);
+
+        Assert.NotNull(first);
+        Assert.Null(second);
+    }
+
+    [Fact]
+    public void ConsumeRefreshToken_CannotBeUsedTwice()
+    {
+        using var db = CreateDatabase();
+        var tokens = db.CreateTokenPair("client-1", null);
+
+        var first = db.ConsumeRefreshToken(tokens.RefreshToken);
+        var second = db.ConsumeRefreshToken(tokens.RefreshToken);
+
+        Assert.NotNull(first);
+        Assert.Null(second);
+    }
+
+    [Fact]
+    public void ValidateApiKey_UpdatesLastUsed()
+    {
+        using var db = CreateDatabase();
+        var (rawKey, _) = db.CreateApiKey("test-key");
+
+        Assert.True(db.ValidateApiKey(rawKey));
+        Assert.False(db.ValidateApiKey("wrong_key"));
+    }
+
     private static DiaryDatabase CreateDatabase()
     {
         var path = Path.Combine(Path.GetTempPath(), $"recall-tests-{Guid.NewGuid():N}.db");

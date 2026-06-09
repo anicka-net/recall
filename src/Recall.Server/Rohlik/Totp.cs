@@ -1,5 +1,6 @@
 using System.Net;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace Recall.Server.Rohlik;
 
@@ -28,6 +29,8 @@ public static class Totp
     {
         var key = Base32Decode(base32Secret);
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 30;
+        var tokenBytes = Encoding.UTF8.GetBytes(token);
+        var match = false;
 
         for (var i = -window; i <= window; i++)
         {
@@ -39,10 +42,12 @@ public static class Totp
                      | (hmac[offset + 1] << 16)
                      | (hmac[offset + 2] << 8)
                      | hmac[offset + 3];
-            var expected = (code % 1_000_000).ToString().PadLeft(6, '0');
-            if (expected == token) return true;
+            var expected = Encoding.UTF8.GetBytes(
+                (code % 1_000_000).ToString().PadLeft(6, '0'));
+            if (CryptographicOperations.FixedTimeEquals(expected, tokenBytes))
+                match = true;
         }
-        return false;
+        return match;
     }
 
     private static byte[] Base32Decode(string input)
